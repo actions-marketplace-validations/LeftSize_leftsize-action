@@ -1,0 +1,200 @@
+policies:
+  # ========================================
+  # 🖥️ VIRTUAL MACHINES
+  # ========================================
+  - name: leftsize-idle-vm
+    description: "Find idle Virtual Machines that can be stopped or downsized"
+    resource: azure.vm
+    filters:
+      - type: metric
+        metric: 'Percentage CPU'
+        aggregation: 'average'
+        timeframe: 7  # 7 days
+        interval: 'P1D'  # Daily intervals
+        op: 'le' 
+        threshold: 5.0  # CPU usage <= 5%
+      - type: value
+        key: 'properties.extended.instanceView.powerState.displayStatus'
+        value: 'VM running'
+    actions:
+      - type: mark-for-op
+        op: stop
+        days: 1
+        tag: leftsize-idle-vm-stop
+
+  # ========================================
+  # 🌐 APP SERVICE PLANS  
+  # ========================================
+  - name: leftsize-idle-app-service-plan-no-apps
+    description: "Find empty App Service Plans with no applications deployed"
+    resource: azure.appserviceplan
+    filters:
+      # Filter for plans with no apps deployed (using sites count)
+      - type: value
+        key: 'properties.numberOfSites'
+        value: 0
+      # Exclude Free/Shared tiers (they don't cost much anyway)
+      - type: value
+        key: 'sku.tier'
+        op: 'not-in'
+        value: ['Free', 'Shared']
+      # Only include plans created more than 2 days ago (avoid catching temporary deployments)
+      - type: value
+        key: 'properties.dateCreated'
+        op: 'le'
+        value_type: age
+        value: 2
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 7
+        tag: leftsize-empty-asp-delete
+
+  - name: leftsize-idle-app-service-plan
+    description: "Find underutilized App Service Plans with low resource usage"
+    resource: azure.appserviceplan
+    filters:
+      # Only target plans that have apps (to distinguish from empty plans)
+      - type: value
+        key: 'properties.numberOfSites'
+        op: 'gt'
+        value: 0
+      # Low CPU usage over 7 days
+      - type: metric
+        metric: 'CpuPercentage'
+        aggregation: 'average'
+        timeframe: 7  # 7 days
+        interval: 'P1D'  # Daily intervals
+        op: 'le'
+        threshold: 10.0  # CPU usage <= 10%
+      # Low memory usage over 7 days
+      - type: metric
+        metric: 'MemoryPercentage'
+        aggregation: 'average'
+        timeframe: 7  # 7 days
+        interval: 'P1D'  # Daily intervals
+        op: 'le'
+        threshold: 30.0  # Memory usage <= 30%
+      # Exclude Free/Shared tiers (limited scaling options)
+      - type: value
+        key: 'sku.tier'
+        op: 'not-in'
+        value: ['Free', 'Shared']
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 3
+        tag: leftsize-idle-asp-review
+
+  - name: leftsize-outdated-app-service-plan
+    description: "Find App Service Plans using outdated or inefficient SKUs"
+    resource: azure.appserviceplan
+    filters:
+      # Target legacy SKUs that should be upgraded
+      - type: value
+        key: 'sku.name'
+        op: 'in'
+        value: ['S1', 'S2', 'S3', 'P1v2', 'P2v2', 'P3v2', 'B1', 'B2', 'B3']  # Legacy SKUs
+      # Only include plans that have been running for more than 30 days
+      - type: value
+        key: 'properties.dateCreated'
+        op: 'le'
+        value_type: age
+        value: 30
+      # Must have apps deployed (active workloads to migrate)
+      - type: value
+        key: 'properties.numberOfSites'
+        op: 'gt'
+        value: 0
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-outdated-asp-upgrade
+
+  # ========================================
+  # 💾 STORAGE & DISKS
+  # ========================================
+  - name: leftsize-unattached-disk
+    description: "Find unattached managed disks that can be deleted"
+    resource: azure.disk
+    filters:
+      - type: value
+        key: 'properties.diskState'
+        value: 'Unattached'
+      # Only flag disks older than 7 days (avoid catching temporary detachments)
+      - type: value
+        key: 'properties.timeCreated'
+        op: 'le'
+        value_type: age
+        value: 7  # Older than 7 days
+      # Exclude OS disks (higher risk)
+      - type: value
+        key: 'properties.osType'
+        value: null
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 30
+        tag: leftsize-unattached-disk-delete
+
+  # ========================================
+  # 🌐 NETWORKING
+  # ========================================
+  - name: leftsize-unused-public-ip
+    description: "Find unused public IP addresses that can be released"
+    resource: azure.publicip
+    filters:
+      # Not attached to any resource
+      - type: value
+        key: 'properties.ipConfiguration'
+        value: null
+      # Exclude static IPs that might be reserved intentionally (check allocation method)
+      - type: value
+        key: 'properties.publicIPAllocationMethod'
+        op: 'ne'
+        value: 'Static'
+      # Only flag IPs older than 3 days
+      - type: value
+        key: 'properties.timeCreated'
+        op: 'le'
+        value_type: age
+        value: 3
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-unused-ip-delete
+
+  # ========================================
+  # ⚖️ LOAD BALANCERS
+  # ========================================
+  - name: leftsize-inactive-azure-load-balancer
+    description: "Find Azure Load Balancers with no active backend pools or targets"
+    resource: azure.loadbalancer
+    filters:
+      # Load balancer has no backend pools configured
+      - or:
+        - type: value
+          key: 'properties.backendAddressPools'
+          value: []
+        # Or backend pools exist but have no IP configurations (no VMs/resources attached)
+        - type: value
+          key: 'properties.backendAddressPools[].properties.backendIPConfigurations'
+          value: []
+      # Load balancer is older than 7 days (avoid catching temporary deployments)
+      - type: value
+        key: 'properties.timeCreated'
+        op: 'le'
+        value_type: age
+        value: 7
+      # Exclude Basic SKU if in production (often used for testing)
+      - type: value
+        key: 'tags.environment'
+        op: 'not-in'
+        value: ['prod', 'production']
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-inactive-lb-delete

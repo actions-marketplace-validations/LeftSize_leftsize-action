@@ -1,0 +1,23 @@
+# LeftSize Runner Dependencies
+# Cloud Custodian for Azure resource scanning
+c7n>=0.9.40
+c7n-azure>=0.7.40
+
+# Azure SDK for authentication and resource management
+azure-identity>=1.19.0
+azure-mgmt-core>=1.4.0
+
+# HTTP requests for posting findings to backend
+requests>=2.32.0
+
+# JSON schema validation for configuration
+jsonschema>=4.23.0
+
+# YAML configuration parsing
+pyyaml>=6.0.0
+
+# CLI argument parsing
+click>=8.1.0
+
+# Structured logging
+structlog>=24.0.0

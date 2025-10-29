@@ -1,0 +1,87 @@
+name: 'LeftSize Cloud Cost Optimization'
+description: 'Scan AWS and Azure infrastructure for cost optimization opportunities using Cloud Custodian'
+author: 'LeftSize'
+branding:
+  icon: 'cloud'
+  color: 'blue'
+
+inputs:
+  # Required inputs
+  installation-id:
+    description: 'GitHub App installation ID (from LeftSize onboarding)'
+    required: true
+  
+  repository-token:
+    description: 'Secure repository token (from LeftSize onboarding)'
+    required: true
+  
+  # Backend configuration
+  backend-url:
+    description: 'LeftSize backend API URL'
+    required: false
+    default: 'https://api.leftsize.io'
+  
+  # Cloud provider configuration
+  cloud-provider:
+    description: 'Cloud provider to scan (azure or aws)'
+    required: false
+    default: 'azure'
+  
+  # Azure-specific inputs
+  azure-subscription-ids:
+    description: 'Comma-separated Azure subscription IDs to scan (empty = all accessible)'
+    required: false
+  
+  # AWS-specific inputs
+  aws-regions:
+    description: 'Comma-separated AWS regions to scan (empty = all accessible)'
+    required: false
+  
+  # Policy configuration
+  include-policies:
+    description: 'Comma-separated policy categories to include (e.g., cost-optimization,governance,security)'
+    required: false
+  
+  exclude-policies:
+    description: 'Comma-separated specific policy names to exclude (e.g., leftsize-idle-vm)'
+    required: false
+  
+  custom-policies:
+    description: 'Path to custom policy directory in your repository'
+    required: false
+  
+  config-file:
+    description: 'Path to custom leftsize.yml configuration file'
+    required: false
+  
+  # Execution options
+  verbose:
+    description: 'Enable verbose logging'
+    required: false
+    default: 'false'
+
+outputs:
+  findings-count:
+    description: 'Total number of findings detected'
+  
+  findings-submitted:
+    description: 'Whether findings were successfully submitted to backend'
+  
+  findings-json:
+    description: 'JSON string of all findings (for custom processing)'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    LEFTSIZE_INSTALLATION_ID: ${{ inputs.installation-id }}
+    LEFTSIZE_REPOSITORY_TOKEN: ${{ inputs.repository-token }}
+    LEFTSIZE_BACKEND_URL: ${{ inputs.backend-url }}
+    LEFTSIZE_CLOUD_PROVIDER: ${{ inputs.cloud-provider }}
+    LEFTSIZE_AZURE_SUBSCRIPTION_IDS: ${{ inputs.azure-subscription-ids }}
+    LEFTSIZE_AWS_REGIONS: ${{ inputs.aws-regions }}
+    LEFTSIZE_INCLUDE_POLICIES: ${{ inputs.include-policies }}
+    LEFTSIZE_EXCLUDE_POLICIES: ${{ inputs.exclude-policies }}
+    LEFTSIZE_CUSTOM_POLICIES: ${{ inputs.custom-policies }}
+    LEFTSIZE_CONFIG_FILE: ${{ inputs.config-file }}
+    LEFTSIZE_VERBOSE: ${{ inputs.verbose }}

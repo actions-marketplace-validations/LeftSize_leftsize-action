@@ -1,0 +1,551 @@
+# ========================================
+# AWS Governance & Security Policies
+# ========================================
+#
+# This policy file contains rules for detecting security misconfigurations,
+# compliance violations, and governance issues in AWS.
+#
+# These are NOT cost optimization rules - they are security and governance
+# best practices that apply to any organization.
+#
+# Category: governance, security, compliance
+# ========================================
+
+policies:
+  # ========================================
+  # 💾 S3 BUCKET SECURITY
+  # ========================================
+  
+  - name: leftsize-public-s3-access
+    description: |
+      Detect S3 buckets that allow public or anonymous access.
+      
+      Publicly exposed S3 buckets are a top cause of data breaches and compliance failures.
+      This rule identifies buckets accessible to anyone on the internet.
+      
+      Detection criteria:
+      - Block public access settings disabled
+      - Public ACLs or bucket policies allowing public read/write
+      - HTTPS-only (SSL) not enforced
+      
+      Security impact: HIGH - Data breach risk, compliance violations
+      Compliance: CIS AWS Foundations, ISO 27001, SOC2, GDPR
+    
+    resource: s3
+    
+    filters:
+      # Check for public access configurations
+      - or:
+        # Block public ACLs is false
+        - type: value
+          key: PublicAccessBlockConfiguration.BlockPublicAcls
+          value: false
+        
+        # Ignore public ACLs is false
+        - type: value
+          key: PublicAccessBlockConfiguration.IgnorePublicAcls
+          value: false
+        
+        # Block public policy is false
+        - type: value
+          key: PublicAccessBlockConfiguration.BlockPublicPolicy
+          value: false
+        
+        # Restrict public buckets is false
+        - type: value
+          key: PublicAccessBlockConfiguration.RestrictPublicBuckets
+          value: false
+        
+        # No block public access configuration at all
+        - type: value
+          key: PublicAccessBlockConfiguration
+          value: absent
+    
+    actions:
+      - type: tag
+        key: 'leftsize-security-issue'
+        value: 'public-s3-access'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'high'
+      
+      - type: tag
+        key: 'leftsize-compliance'
+        value: 'CIS-AWS-Foundations'
+      
+      - type: tag
+        key: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-public-s3-notify
+
+  - name: leftsize-unencrypted-s3-buckets
+    description: |
+      Ensure all S3 buckets have encryption enabled at rest.
+      
+      Unencrypted S3 buckets violate security best practices and regulatory standards.
+      Encryption is a simple, low-cost safeguard against data theft.
+      
+      Detection criteria:
+      - S3 bucket without default encryption configuration
+      - Neither SSE-S3 nor SSE-KMS encryption enabled
+      
+      Security impact: HIGH - Data exposure risk
+      Compliance: CIS AWS Foundations, ISO 27001, SOC2, PCI-DSS
+    
+    resource: s3
+    
+    filters:
+      # No encryption configuration
+      - or:
+        - type: bucket-encryption
+          state: false
+        
+        - type: value
+          key: Encryption
+          value: absent
+    
+    actions:
+      - type: tag
+        key: 'leftsize-security-issue'
+        value: 'unencrypted-s3-bucket'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'high'
+      
+      - type: tag
+        key: 'leftsize-compliance'
+        value: 'CIS-AWS-Foundations'
+      
+      - type: tag
+        key: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-unencrypted-s3-notify
+
+  # ========================================
+  # 🔒 NETWORK SECURITY (SECURITY GROUPS)
+  # ========================================
+  
+  - name: leftsize-open-security-groups
+    description: |
+      Identify Security Groups with inbound rules exposing sensitive ports to the internet.
+      
+      Inbound rules allowing 0.0.0.0/0 on admin/database ports are a major attack surface.
+      These misconfigurations are often unnecessary and lead to intrusion or data loss.
+      
+      Detection criteria:
+      - Inbound rules from 0.0.0.0/0
+      - Sensitive ports: SSH (22), RDP (3389), SQL (1433, 3306, 5432), Elasticsearch (9200)
+      - Any security group with public access on these ports
+      
+      Security impact: CRITICAL - Direct intrusion risk
+      Compliance: CIS AWS Foundations, PCI-DSS, NIST
+    
+    resource: security-group
+    
+    filters:
+      # Has ingress rules
+      - type: value
+        key: IpPermissions
+        value: not-null
+      
+      # Check for rules allowing access from 0.0.0.0/0 on sensitive ports
+      - or:
+        # SSH (22)
+        - type: ingress
+          Ports: [22]
+          Cidr:
+            value: "0.0.0.0/0"
+        
+        # RDP (3389)
+        - type: ingress
+          Ports: [3389]
+          Cidr:
+            value: "0.0.0.0/0"
+        
+        # SQL Server (1433)
+        - type: ingress
+          Ports: [1433]
+          Cidr:
+            value: "0.0.0.0/0"
+        
+        # MySQL (3306)
+        - type: ingress
+          Ports: [3306]
+          Cidr:
+            value: "0.0.0.0/0"
+        
+        # PostgreSQL (5432)
+        - type: ingress
+          Ports: [5432]
+          Cidr:
+            value: "0.0.0.0/0"
+        
+        # Elasticsearch (9200)
+        - type: ingress
+          Ports: [9200]
+          Cidr:
+            value: "0.0.0.0/0"
+        
+        # MongoDB (27017)
+        - type: ingress
+          Ports: [27017]
+          Cidr:
+            value: "0.0.0.0/0"
+    
+    actions:
+      - type: tag
+        key: 'leftsize-security-issue'
+        value: 'open-security-group'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'critical'
+      
+      - type: tag
+        key: 'leftsize-compliance'
+        value: 'CIS-AWS-Foundations'
+      
+      - type: tag
+        key: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-open-sg-notify
+
+  # ========================================
+  # 💿 EBS VOLUME ENCRYPTION
+  # ========================================
+  
+  - name: leftsize-unencrypted-ebs-volumes
+    description: |
+      Ensure all EBS volumes have encryption enabled.
+      
+      Unencrypted EBS volumes violate security best practices and can breach regulatory standards.
+      Encryption at rest protects against unauthorized data access.
+      
+      Detection criteria:
+      - EBS volumes without encryption enabled
+      - Both attached and unattached volumes checked
+      
+      Security impact: HIGH - Data exposure risk
+      Compliance: CIS AWS Foundations, ISO 27001, PCI-DSS
+    
+    resource: ebs
+    
+    filters:
+      # Encryption is not enabled
+      - type: value
+        key: Encrypted
+        value: false
+    
+    actions:
+      - type: tag
+        key: 'leftsize-security-issue'
+        value: 'unencrypted-ebs-volume'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'high'
+      
+      - type: tag
+        key: 'leftsize-compliance'
+        value: 'CIS-AWS-Foundations'
+      
+      - type: tag
+        key: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-unencrypted-ebs-notify
+
+  # ========================================
+  # 🗄️ RDS DATABASE ENCRYPTION
+  # ========================================
+  
+  - name: leftsize-unencrypted-rds-instances
+    description: |
+      Ensure all RDS instances have encryption enabled at rest.
+      
+      Unencrypted databases violate security best practices and regulatory requirements.
+      Encryption protects sensitive data from unauthorized access.
+      
+      Detection criteria:
+      - RDS instances without StorageEncrypted enabled
+      - All database engines checked
+      
+      Security impact: HIGH - Data exposure risk, compliance violation
+      Compliance: CIS AWS Foundations, ISO 27001, PCI-DSS, HIPAA
+    
+    resource: rds
+    
+    filters:
+      # Storage encryption is not enabled
+      - type: value
+        key: StorageEncrypted
+        value: false
+    
+    actions:
+      - type: tag
+        key: 'leftsize-security-issue'
+        value: 'unencrypted-rds-instance'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'high'
+      
+      - type: tag
+        key: 'leftsize-compliance'
+        value: 'CIS-AWS-Foundations'
+      
+      - type: tag
+        key: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-unencrypted-rds-notify
+
+  # ========================================
+  # 🏷️ OWNERSHIP TAG COMPLIANCE
+  # ========================================
+  
+  - name: leftsize-missing-ownership-tags
+    description: |
+      Ensure all active resources have clear ownership metadata for cost tracking and accountability.
+      
+      Resources without ownership tags create hidden spend, block cleanup, and prevent accurate
+      cost allocation. This rule identifies resources missing the required 'owner' tag.
+      
+      Detection criteria:
+      - Missing 'owner' tag
+      - Empty or null 'owner' tag value
+      - Applies to all major resource types (EC2, RDS, S3, EBS, etc.)
+      
+      Governance impact: HIGH - Cost attribution, accountability, lifecycle management
+      Compliance: FinOps best practices, cost allocation policies
+    
+    resource: aws.ec2
+    
+    filters:
+      # Check for missing or empty owner tag
+      - or:
+        # Owner tag does not exist
+        - type: value
+          key: 'tag:owner'
+          value: absent
+        
+        # Owner tag exists but is empty
+        - type: value
+          key: 'tag:owner'
+          value: ''
+        
+        # Owner tag is null
+        - type: value
+          key: 'tag:owner'
+          value: null
+    
+    actions:
+      - type: tag
+        key: 'leftsize-governance-issue'
+        value: 'missing-ownership-tags'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'medium'
+      
+      - type: tag
+        key: 'leftsize-compliance'
+        value: 'finops-tagging-policy'
+      
+      - type: tag
+        key: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-ownership-tags-notify
+
+  # Apply same ownership tag check to RDS instances
+  - name: leftsize-missing-ownership-tags-rds
+    description: |
+      Ensure all RDS database instances have clear ownership metadata.
+    
+    resource: aws.rds
+    
+    filters:
+      - or:
+        - type: value
+          key: 'tag:owner'
+          value: absent
+        - type: value
+          key: 'tag:owner'
+          value: ''
+        - type: value
+          key: 'tag:owner'
+          value: null
+    
+    actions:
+      - type: tag
+        key: 'leftsize-governance-issue'
+        value: 'missing-ownership-tags'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'medium'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-ownership-tags-notify
+
+  # Apply same ownership tag check to S3 buckets
+  - name: leftsize-missing-ownership-tags-s3
+    description: |
+      Ensure all S3 buckets have clear ownership metadata.
+    
+    resource: aws.s3
+    
+    filters:
+      - or:
+        - type: value
+          key: 'tag:owner'
+          value: absent
+        - type: value
+          key: 'tag:owner'
+          value: ''
+        - type: value
+          key: 'tag:owner'
+          value: null
+    
+    actions:
+      - type: tag
+        key: 'leftsize-governance-issue'
+        value: 'missing-ownership-tags'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'medium'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-ownership-tags-notify
+
+  # Apply same ownership tag check to EBS volumes
+  - name: leftsize-missing-ownership-tags-ebs
+    description: |
+      Ensure all EBS volumes have clear ownership metadata.
+    
+    resource: aws.ebs
+    
+    filters:
+      - or:
+        - type: value
+          key: 'tag:owner'
+          value: absent
+        - type: value
+          key: 'tag:owner'
+          value: ''
+        - type: value
+          key: 'tag:owner'
+          value: null
+    
+    actions:
+      - type: tag
+        key: 'leftsize-governance-issue'
+        value: 'missing-ownership-tags'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'medium'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-ownership-tags-notify
+
+  # Apply same ownership tag check to Load Balancers
+  - name: leftsize-missing-ownership-tags-elb
+    description: |
+      Ensure all Elastic Load Balancers have clear ownership metadata.
+    
+    resource: aws.elb
+    
+    filters:
+      - or:
+        - type: value
+          key: 'tag:owner'
+          value: absent
+        - type: value
+          key: 'tag:owner'
+          value: ''
+        - type: value
+          key: 'tag:owner'
+          value: null
+    
+    actions:
+      - type: tag
+        key: 'leftsize-governance-issue'
+        value: 'missing-ownership-tags'
+      
+      - type: tag
+        key: 'leftsize-severity'
+        value: 'medium'
+      
+      - type: mark-for-op
+        op: notify
+        days: 0
+        tag: leftsize-ownership-tags-notify
+
+  # ========================================
+  # 📝 TEMPLATE FOR FUTURE GOVERNANCE RULES
+  # ========================================
+  # 
+  # Copy this template when adding new AWS governance/security rules:
+  #
+  # - name: leftsize-[security-issue]
+  #   description: |
+  #     [Detailed description of security issue]
+  #     
+  #     Security impact: [CRITICAL|HIGH|MEDIUM|LOW]
+  #     Compliance: [Standards]
+  #   
+  #   resource: [aws-resource-type]
+  #   
+  #   filters:
+  #     # Add filters to detect the security issue
+  #     - type: value
+  #       key: '[property-path]'
+  #       value: '[value-to-match]'
+  #   
+  #   actions:
+  #     - type: tag
+  #       key: 'leftsize-security-issue'
+  #       value: '[issue-name]'
+  #     
+  #     - type: tag
+  #       key: 'leftsize-severity'
+  #       value: '[critical|high|medium|low]'
+  #     
+  #     - type: mark-for-op
+  #       op: notify
+  #       days: 0
+  #       tag: leftsize-[issue]-notify
+  #
+  # ========================================

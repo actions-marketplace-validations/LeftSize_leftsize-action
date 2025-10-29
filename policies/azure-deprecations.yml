@@ -1,0 +1,191 @@
+# ========================================
+# Azure Service Deprecations & Retirements
+# ========================================
+#
+# This policy file contains rules for detecting Azure services, SKUs, and 
+# features that are scheduled for deprecation or retirement by Microsoft.
+#
+# These are NOT cost optimization rules - they are mandatory migrations
+# required to maintain service continuity.
+#
+# Category: deprecation, breaking-change, migration-required
+# ========================================
+
+policies:
+  # ========================================
+  # 🖥️ VIRTUAL MACHINE DEPRECATIONS
+  # ========================================
+  
+  - name: leftsize-nvv4-series-retirement
+    description: |
+      Detect NVv4-series VMs scheduled for retirement on September 30, 2026.
+      
+      Microsoft is retiring the following VM sizes:
+      - Standard_NV4as_v4, Standard_NV4ahs_v4
+      - Standard_NV8as_v4, Standard_NV8ahs_v4
+      - Standard_NV16as_v4, Standard_NV16ahs_v4
+      - Standard_NV32as_v4, Standard_NV32ahs_v4
+      
+      Recommended migration: NVads_V710_v5-series
+      - Greater GPU memory bandwidth per GPU
+      - Better support for graphics applications, virtual desktops, and visualizations
+      - Improved AI inference workload performance
+      
+      Timeline:
+      - September 30, 2025: Last day for Reserved Instance purchases
+      - April 2026: Microsoft fix for resize operation error expected
+      - September 30, 2026: RETIREMENT DATE - VMs deallocated, no SLA, no support
+      
+      Reference: https://azure.microsoft.com/updates?id=500578
+    
+    resource: azure.vm
+    
+    filters:
+      # Match all NVv4-series VM sizes
+      - type: value
+        key: 'properties.hardwareProfile.vmSize'
+        op: 'in'
+        value:
+          - 'Standard_NV4as_v4'
+          - 'Standard_NV4ahs_v4'
+          - 'Standard_NV8as_v4'
+          - 'Standard_NV8ahs_v4'
+          - 'Standard_NV16as_v4'
+          - 'Standard_NV16ahs_v4'
+          - 'Standard_NV32as_v4'
+          - 'Standard_NV32ahs_v4'
+      
+      # Only flag running or stopped VMs (not already deallocated)
+      - type: value
+        key: 'properties.extended.instanceView.powerState.code'
+        op: 'in'
+        value:
+          - 'PowerState/running'
+          - 'PowerState/stopped'
+          - 'PowerState/starting'
+    
+    actions:
+      # Tag for migration tracking
+      - type: tag
+        tag: 'leftsize-migration-required'
+        value: 'nvv4-series-retirement'
+      
+      - type: tag
+        tag: 'leftsize-retirement-date'
+        value: '2026-09-30'
+      
+      - type: tag
+        tag: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      # Mark for GitHub issue creation
+      - type: mark-for-op
+        op: notify
+        days: 1  # Notify after 1 day
+        tag: leftsize-nvv4-retirement-notify
+
+  # ========================================
+  # ⚡ AZURE FUNCTIONS DEPRECATIONS
+  # ========================================
+  
+  - name: leftsize-functions-linux-consumption-retirement
+    description: |
+      Detect Azure Functions using the Linux Consumption hosting plan scheduled for retirement on September 30, 2028.
+      
+      Microsoft is retiring the Linux Consumption (Y1) hosting plan and recommends migration to Flex Consumption plan.
+      
+      Benefits of Flex Consumption:
+      - Faster scaling and cold start mitigation
+      - Advanced networking capabilities
+      - Concurrency control for better resource management
+      - Continued feature development and support
+      
+      Timeline:
+      - September 30, 2025: No new features; removed from Azure Portal, Visual Studio, and VS Code
+      - September 30, 2028: RETIREMENT DATE - No technical support, cannot create new Linux Consumption apps
+      
+      Detection:
+      - Pricing Tier: Dynamic (Y1: 0)
+      - Operating System: Linux
+      - App Service Plans with Linux Consumption functions
+      
+      Note: Can still be managed via infrastructure as code and Azure CLI until retirement date.
+    
+    resource: azure.appserviceplan
+    
+    filters:
+      # Match Linux Consumption hosting plan (Y1 SKU)
+      - type: value
+        key: 'sku.name'
+        value: 'Y1'
+      
+      # Must be Linux OS
+      - type: value
+        key: 'kind'
+        op: 'regex'
+        value: '.*linux.*'
+      
+      # Only plans that have function apps deployed
+      - type: value
+        key: 'properties.numberOfSites'
+        op: 'gt'
+        value: 0
+    
+    actions:
+      # Tag for migration tracking
+      - type: tag
+        tag: 'leftsize-migration-required'
+        value: 'functions-linux-consumption-retirement'
+      
+      - type: tag
+        tag: 'leftsize-retirement-date'
+        value: '2028-09-30'
+      
+      - type: tag
+        tag: 'leftsize-portal-removal-date'
+        value: '2025-09-30'
+      
+      - type: tag
+        tag: 'leftsize-detected-date'
+        value: '{now:%Y-%m-%d}'
+      
+      # Mark for GitHub issue creation
+      - type: mark-for-op
+        op: notify
+        days: 1  # Notify after 1 day
+        tag: leftsize-functions-linux-consumption-notify
+
+  # ========================================
+  # 📝 TEMPLATE FOR FUTURE DEPRECATIONS
+  # ========================================
+  # 
+  # Copy this template when adding new Azure service deprecations:
+  #
+  # - name: leftsize-[service-name]-retirement
+  #   description: |
+  #     [Detailed description of what is being retired]
+  #     
+  #     Retirement date: [DATE]
+  #     Recommended migration: [TARGET]
+  #     
+  #     Reference: [AZURE UPDATE URL]
+  #   
+  #   resource: azure.[resource-type]
+  #   
+  #   filters:
+  #     # Add filters to detect affected resources
+  #     - type: value
+  #       key: '[property-path]'
+  #       value: '[value-to-match]'
+  #   
+  #   actions:
+  #     - type: tag
+  #       key: 'leftsize-migration-required'
+  #       value: '[rule-name]'
+  #     
+  #     - type: mark-for-op
+  #       op: notify
+  #       days: 0
+  #       tag: leftsize-[service]-retirement-notify
+  #
+  # ========================================

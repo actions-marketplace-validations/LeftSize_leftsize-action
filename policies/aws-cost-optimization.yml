@@ -1,0 +1,344 @@
+policies:
+  # ========================================
+  # 📦 ECS / FARGATE
+  # ========================================
+  - name: leftsize-idle-ecs-container-instances
+    description: "Find ECS clusters with idle container instances due to high ASG minimum capacity"
+    resource: aws.asg
+    filters:
+      # ASG must be associated with an ECS cluster (has specific tag)
+      - type: value
+        key: 'Tags'
+        value: present
+      - or:
+        - type: value
+          key: 'tag:aws:ecs:cluster-name'
+          value: present
+        # Or tagged as ECS capacity provider
+        - type: value
+          key: 'tag:AmazonECSManaged'
+          value: present
+      # ASG has minimum capacity > 1
+      - type: value
+        key: 'MinSize'
+        op: greater-than
+        value: 1
+      # Check if actual instances exceed what's needed
+      # (Custom filter would check ECS container instance utilization)
+      # For now, flag ASGs with high minimum for manual review
+      - type: value
+        key: 'MinSize'
+        op: gte
+        value: 3
+      # ASG has been active for at least 14 days
+      - type: value
+        key: 'CreatedTime'
+        op: less-than
+        value_type: age
+        value: 14
+    actions:
+      - type: tag
+        key: leftsize-ecs-capacity-review
+        value: 'check-for-idle-instances'
+
+  - name: leftsize-fargate-spot-eligible
+    description: "Find ECS services using regular Fargate that could use Fargate Spot for 70% savings"
+    resource: aws.ecs-service
+    filters:
+      # Only active services
+      - type: value
+        key: 'status'
+        value: 'ACTIVE'
+      # Services using Fargate launch type (not EC2)
+      - or:
+        - type: value
+          key: 'launchType'
+          value: 'FARGATE'
+        # Or using FARGATE capacity provider (but not SPOT)
+        - and:
+          - type: value
+            key: 'capacityProviderStrategy[].capacityProvider'
+            op: contains
+            value: 'FARGATE'
+          - not:
+            - type: value
+              key: 'capacityProviderStrategy[].capacityProvider'
+              op: contains
+              value: 'FARGATE_SPOT'
+      # Exclude production services (unless tagged as Spot-eligible)
+      - or:
+        # Non-production environments
+        - type: value
+          key: 'tags'
+          value: present
+        - not:
+          - type: value
+            key: 'tag:Environment'
+            op: in
+            value: ['prod', 'production', 'prd']
+        # Or explicitly tagged as Spot-eligible
+        - type: value
+          key: 'tag:SpotEligible'
+          value: 'true'
+      # Services with multiple tasks (better for handling interruptions)
+      - type: value
+        key: 'desiredCount'
+        op: gte
+        value: 2
+      # Service has been running for at least 7 days
+      - type: value
+        key: 'createdAt'
+        op: less-than
+        value_type: age
+        value: 7
+    actions:
+      - type: tag
+        key: leftsize-fargate-spot-eligible
+        value: 'review-for-spot-migration'
+
+  # ========================================
+  # 🖥️ EC2 INSTANCES
+  # ========================================
+  - name: leftsize-inactive-ec2-instance
+    description: "Find inactive EC2 instances with low CPU and network utilization"
+    resource: aws.ec2
+    filters:
+      # Only check running instances
+      - type: value
+        key: 'State.Name'
+        value: 'running'
+      # Instance must be running for at least 7 days
+      - type: instance-age
+        op: gte
+        days: 7
+      # Low CPU utilization (≤5% average over 7 days)
+      - type: metrics
+        name: CPUUtilization
+        namespace: AWS/EC2
+        dimensions:
+          InstanceId: instance-id
+        op: less-than
+        value: 5
+        percent-attr: Average
+        days: 7
+      # Low network output (minimal activity)
+      - type: metrics
+        name: NetworkOut
+        namespace: AWS/EC2
+        dimensions:
+          InstanceId: instance-id
+        op: less-than
+        value: 1000000  # 1MB total over 7 days
+        statistics: Sum
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: stop
+        days: 3
+        tag: leftsize-inactive-ec2-stop
+
+  - name: leftsize-underutilized-ec2-instance
+    description: "Find underutilized EC2 instances with low but non-zero CPU usage (right-sizing candidates)"
+    resource: aws.ec2
+    filters:
+      # Only running instances
+      - type: value
+        key: 'State.Name'
+        value: 'running'
+      # Instance running for at least 14 days (need longer period for utilization trends)
+      - type: instance-age
+        op: gte
+        days: 14
+      # CPU utilization between 10-40% average over 14 days (underutilized but not idle)
+      - and:
+        - type: metrics
+          name: CPUUtilization
+          namespace: AWS/EC2
+          dimensions:
+            InstanceId: instance-id
+          op: greater-than
+          value: 10
+          percent-attr: Average
+          days: 14
+        - type: metrics
+          name: CPUUtilization
+          namespace: AWS/EC2
+          dimensions:
+            InstanceId: instance-id
+          op: less-than
+          value: 40
+          percent-attr: Average
+          days: 14
+      # Exclude t2/t3/t4g burstable instances (they're designed for variable loads)
+      - not:
+        - type: value
+          key: 'InstanceType'
+          op: regex
+          value: '^(t2|t3|t4g)\.'
+      # Exclude instances already tagged as optimized
+      - not:
+        - type: value
+          key: 'tag:RightSized'
+          value: present
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-underutilized-ec2-review
+
+  - name: leftsize-multi-az-nonprod-ec2
+    description: "Find non-production EC2 instances spread across multiple AZs (unnecessary HA)"
+    resource: aws.ec2
+    filters:
+      # Only running instances
+      - type: value
+        key: 'State.Name'
+        value: 'running'
+      # Non-production environments
+      - type: value
+        key: 'Tags'
+        value: present
+      - or:
+        - type: value
+          key: 'tag:Environment'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tag:Env'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+      # Instance has been running for at least 7 days (avoid catching new deployments)
+      - type: instance-age
+        op: gte
+        days: 7
+    # Note: The policy will flag instances. Manual review needed to identify which AZs to consolidate.
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-multi-az-review
+
+  # ========================================
+  # 💾 EBS VOLUMES
+  # ========================================
+  - name: leftsize-unattached-ebs-volume
+    description: "Find unattached EBS volumes that can be deleted"
+    resource: aws.ebs
+    filters:
+      # Volume is not attached to any instance
+      - type: value
+        key: 'State'
+        value: 'available'
+      # Volume is older than 7 days (avoid temporary detachments)
+      - type: value
+        key: 'CreateTime'
+        op: less-than
+        value_type: age
+        value: 7
+      # Not a snapshot (those are handled separately)
+      - not:
+        - type: value
+          key: 'SnapshotId'
+          value: present
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 30
+        tag: leftsize-unattached-ebs-delete
+
+  # ========================================
+  # 🌐 ELASTIC IPs
+  # ========================================
+  - name: leftsize-unused-elastic-ip
+    description: "Find unused Elastic IP addresses that can be released"
+    resource: aws.network-addr
+    filters:
+      # Not associated with any instance or network interface
+      - type: value
+        key: 'AssociationId'
+        value: absent
+    actions:
+      - type: mark-for-op
+        op: release
+        days: 7
+        tag: leftsize-unused-eip-release
+
+  # ========================================
+  # 🗄️ RDS INSTANCES
+  # ========================================
+  - name: leftsize-idle-rds-instance
+    description: "Find RDS instances with low connection and CPU utilization"
+    resource: aws.rds
+    filters:
+      # Only check available (running) instances
+      - type: value
+        key: 'DBInstanceStatus'
+        value: 'available'
+      # Low CPU utilization (≤10% average over 7 days)
+      - type: metrics
+        name: CPUUtilization
+        namespace: AWS/RDS
+        op: less-than
+        value: 10
+        percent-attr: Average
+        days: 7
+      # Low database connections (≤2 average over 7 days)
+      - type: metrics
+        name: DatabaseConnections
+        namespace: AWS/RDS
+        op: less-than
+        value: 2
+        statistics: Average
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: stop
+        days: 7
+        tag: leftsize-idle-rds-stop
+
+  # ========================================
+  # 🔄 LOAD BALANCERS
+  # ========================================
+  - name: leftsize-unused-load-balancer
+    description: "Find load balancers with no active targets"
+    resource: aws.elb
+    filters:
+      # No healthy targets
+      - type: value
+        key: 'Instances'
+        value: []
+      # Load balancer is older than 3 days
+      - type: value
+        key: 'CreatedTime'
+        op: less-than
+        value_type: age
+        value: 3
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-unused-elb-delete
+
+  - name: leftsize-unused-alb
+    description: "Find Application Load Balancers with no active target groups"
+    resource: aws.app-elb
+    filters:
+      # Load balancer is older than 3 days
+      - type: value
+        key: 'CreatedTime'
+        op: less-than
+        value_type: age
+        value: 3
+      # Very low request count (effectively unused)
+      - type: metrics
+        name: RequestCount
+        namespace: AWS/ApplicationELB
+        op: less-than
+        value: 10
+        statistics: Sum
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-unused-alb-delete

@@ -1,0 +1,151 @@
+policies:
+  # ========================================
+  # ☸️ AZURE KUBERNETES SERVICE (AKS)
+  # ========================================
+  # These policies are separated from general Azure optimizations
+  # because not all organizations use Kubernetes/AKS
+  
+  - name: leftsize-orphaned-kubernetes-resources
+    description: "Find orphaned Kubernetes resources (PVCs, LoadBalancers, ConfigMaps) that reference deleted objects"
+    resource: azure.aks
+    filters:
+      # Only running clusters
+      - type: value
+        key: 'properties.powerState.code'
+        value: 'Running'
+      # Cluster has been running for at least 7 days (mature deployment)
+      - type: value
+        key: 'properties.creationTime'
+        op: 'le'
+        value_type: age
+        value: 7
+    # Note: This policy identifies AKS clusters for review
+    # Actual orphaned resource detection requires querying Kubernetes API
+    # Backend will use kubectl/client-go to find:
+    #   - PVCs without Pods
+    #   - LoadBalancer Services without backend Pods
+    #   - ConfigMaps/Secrets not referenced by any resource
+    #   - Completed/Failed Jobs older than 7 days
+    actions:
+      - type: tag
+        tag: leftsize-aks-orphaned-resources-check
+        value: 'scan-for-orphaned-k8s-resources'
+
+  - name: leftsize-overprovisioned-aks-nodes
+    description: "Find AKS clusters with overprovisioned node pools (low CPU/memory utilization)"
+    resource: azure.aks
+    filters:
+      # Only running clusters
+      - type: value
+        key: 'properties.powerState.code'
+        value: 'Running'
+      # Cluster has been stable for at least 14 days
+      - type: value
+        key: 'properties.creationTime'
+        op: 'le'
+        value_type: age
+        value: 14
+      # Has at least one agent pool
+      - type: value
+        key: 'properties.agentPoolProfiles'
+        value: present
+    # Note: Detection of actual over-provisioning requires:
+    #   1. Kubernetes Metrics Server data (kubectl top nodes)
+    #   2. Node pool CPU/memory requests vs allocatable
+    #   3. Pod resource utilization patterns
+    # Backend will identify:
+    #   - Nodes with <40% CPU/memory utilization
+    #   - Node pools that can be downsized
+    #   - Opportunities for node pool consolidation
+    actions:
+      - type: tag
+        tag: leftsize-aks-overprovisioned-check
+        value: 'analyze-node-pool-utilization'
+
+  - name: leftsize-aks-cluster-autoscaler-disabled
+    description: "Find AKS clusters without cluster autoscaler enabled"
+    resource: azure.aks
+    filters:
+      # Only running clusters
+      - type: value
+        key: 'properties.powerState.code'
+        value: 'Running'
+      # Check if cluster autoscaler is disabled on all node pools
+      - type: value
+        key: 'properties.agentPoolProfiles[*].enableAutoScaling'
+        op: 'ne'
+        value: true
+      # Exclude very small dev clusters (1-2 nodes total)
+      - type: value
+        key: 'properties.agentPoolProfiles[0].count'
+        op: 'gte'
+        value: 3
+      # Cluster has been running for a while
+      - type: value
+        key: 'properties.creationTime'
+        op: 'le'
+        value_type: age
+        value: 14
+    actions:
+      - type: tag
+        tag: leftsize-aks-enable-autoscaler
+        value: 'consider-enabling-cluster-autoscaler'
+
+  - name: leftsize-aks-using-expensive-vm-sizes
+    description: "Find AKS node pools using expensive VM sizes that could be optimized"
+    resource: azure.aks
+    filters:
+      # Only running clusters
+      - type: value
+        key: 'properties.powerState.code'
+        value: 'Running'
+      # Check for expensive VM series in node pools
+      - type: value
+        key: 'properties.agentPoolProfiles[*].vmSize'
+        op: 'in'
+        value: 
+          # Memory-optimized (often overkill for general workloads)
+          - 'Standard_E4s_v3'
+          - 'Standard_E8s_v3'
+          - 'Standard_E16s_v3'
+          - 'Standard_E32s_v3'
+          # Older generation compute-optimized
+          - 'Standard_F8s'
+          - 'Standard_F16s'
+          # Large general-purpose (often over-provisioned)
+          - 'Standard_D8s_v3'
+          - 'Standard_D16s_v3'
+          - 'Standard_D32s_v3'
+    actions:
+      - type: tag
+        tag: leftsize-aks-expensive-vms
+        value: 'review-vm-size-optimization'
+
+  - name: leftsize-aks-dev-clusters-always-running
+    description: "Find non-production AKS clusters running 24/7"
+    resource: azure.aks
+    filters:
+      # Only running clusters
+      - type: value
+        key: 'properties.powerState.code'
+        value: 'Running'
+      # Tagged as dev/test/staging
+      - or:
+        - type: value
+          key: 'tags.Environment'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tags.environment'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+      # Cluster has been running for at least 7 days
+      - type: value
+        key: 'properties.creationTime'
+        op: 'le'
+        value_type: age
+        value: 7
+    actions:
+      - type: tag
+        tag: leftsize-aks-dev-always-on
+        value: 'consider-start-stop-schedule'
