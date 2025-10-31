@@ -53,7 +53,6 @@ def github_action_main():
     aws_regions = os.getenv('LEFTSIZE_AWS_REGIONS', '')
     include_policies = os.getenv('LEFTSIZE_INCLUDE_POLICIES', '')
     exclude_policies = os.getenv('LEFTSIZE_EXCLUDE_POLICIES', '')
-    custom_policies = os.getenv('LEFTSIZE_CUSTOM_POLICIES', '')
     config_file = os.getenv('LEFTSIZE_CONFIG_FILE', '')
     
     if verbose:
@@ -96,11 +95,8 @@ def github_action_main():
             rules = [r.strip() for r in exclude_policies.split(',') if r.strip()]
             config_data.setdefault('policies', {})['exclude_rules'] = rules
         
-        # Policies directory
+        # Policies directory (bundled in action)
         policies_dir = os.path.join(os.path.dirname(__file__), 'policies')
-        if custom_policies and os.path.exists(custom_policies):
-            # TODO: Merge custom policies with default
-            pass
         
         # Validate authentication based on cloud provider
         if cloud_provider == 'azure':

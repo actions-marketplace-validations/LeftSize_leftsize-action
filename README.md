@@ -82,7 +82,6 @@ jobs:
 | `aws-regions` | No | All accessible | Comma-separated AWS regions to scan |
 | `include-policies` | No | All | Policy categories: `cost-optimization`, `governance`, `security` |
 | `exclude-policies` | No | None | Specific policy names to skip (comma-separated) |
-| `custom-policies` | No | None | Path to custom Cloud Custodian policies in your repo |
 | `verbose` | No | `false` | Enable verbose logging |
 
 ### Outputs
@@ -123,8 +122,8 @@ jobs:
   with:
     installation-id: ${{ secrets.LEFTSIZE_INSTALLATION_ID }}
     repository-token: ${{ secrets.LEFTSIZE_REPOSITORY_TOKEN }}
-    include-policies: cost-optimization  # Only cost policies
-    exclude-policies: leftsize-idle-vm   # Skip specific rule
+    include-policies: cost-optimization,governance  # Only cost and governance policies
+    exclude-policies: leftsize-idle-vm              # Skip specific rule
 ```
 
 ### Custom Processing of Findings

@@ -46,10 +46,6 @@ inputs:
     description: 'Comma-separated specific policy names to exclude (e.g., leftsize-idle-vm)'
     required: false
   
-  custom-policies:
-    description: 'Path to custom policy directory in your repository'
-    required: false
-  
   config-file:
     description: 'Path to custom leftsize.yml configuration file'
     required: false
@@ -82,6 +78,5 @@ runs:
     LEFTSIZE_AWS_REGIONS: ${{ inputs.aws-regions }}
     LEFTSIZE_INCLUDE_POLICIES: ${{ inputs.include-policies }}
     LEFTSIZE_EXCLUDE_POLICIES: ${{ inputs.exclude-policies }}
-    LEFTSIZE_CUSTOM_POLICIES: ${{ inputs.custom-policies }}
     LEFTSIZE_CONFIG_FILE: ${{ inputs.config-file }}
     LEFTSIZE_VERBOSE: ${{ inputs.verbose }}
