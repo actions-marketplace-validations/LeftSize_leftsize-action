@@ -11,6 +11,7 @@ import yaml
 import tempfile
 import subprocess
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -40,14 +41,93 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+# Input validation functions
+def validate_installation_id(installation_id: str) -> bool:
+    """Validate GitHub installation ID format (numeric)"""
+    if not installation_id or not installation_id.strip():
+        return False
+    return re.match(r'^\d+$', installation_id.strip()) is not None
+
+
+def validate_repository_token(token: str) -> bool:
+    """Validate repository token format (GUID)"""
+    if not token or not token.strip():
+        return False
+    # GUID format: 8-4-4-4-12 hex characters
+    guid_pattern = r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    return re.match(guid_pattern, token.strip()) is not None
+
+
+def validate_backend_url(url: str) -> bool:
+    """Validate backend URL format"""
+    if not url or not url.strip():
+        return False
+    # Must be HTTPS and reasonable domain
+    url = url.strip()
+    if not url.startswith('https://'):
+        logger.warning("Backend URL must use HTTPS", url=url)
+        return False
+    # Check for suspicious patterns
+    if any(pattern in url.lower() for pattern in ['169.254.169.254', 'metadata', 'localhost', '127.0.0.1', '0.0.0.0']):
+        logger.error("Backend URL contains suspicious pattern", url=url)
+        return False
+    return True
+
+
+def validate_azure_subscription_id(sub_id: str) -> bool:
+    """Validate Azure subscription ID format (GUID)"""
+    if not sub_id or not sub_id.strip():
+        return False
+    guid_pattern = r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    return re.match(guid_pattern, sub_id.strip()) is not None
+
+
+def validate_aws_region(region: str) -> bool:
+    """Validate AWS region format"""
+    if not region or not region.strip():
+        return False
+    # AWS region pattern: us-east-1, eu-west-2, etc.
+    region_pattern = r'^[a-z]{2}-[a-z]+-\d+$'
+    return re.match(region_pattern, region.strip()) is not None
+
+
+def validate_policy_name(policy_name: str) -> bool:
+    """Validate policy name (alphanumeric, hyphens, underscores only)"""
+    if not policy_name or not policy_name.strip():
+        return False
+    # Only allow safe characters, max 100 chars
+    if len(policy_name) > 100:
+        return False
+    return re.match(r'^[a-zA-Z0-9_-]+$', policy_name.strip()) is not None
+
+
+def sanitize_for_logging(data: Any) -> Any:
+    """Remove sensitive information from data before logging"""
+    if isinstance(data, dict):
+        sanitized = {}
+        sensitive_keys = ['password', 'secret', 'token', 'key', 'credential', 'connectionstring', 'access_key']
+        for k, v in data.items():
+            if any(sensitive in k.lower() for sensitive in sensitive_keys):
+                sanitized[k] = '***REDACTED***'
+            elif isinstance(v, (dict, list)):
+                sanitized[k] = sanitize_for_logging(v)
+            else:
+                sanitized[k] = v
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_for_logging(item) for item in data]
+    else:
+        return data
+
+
 def github_action_main():
     """GitHub Action entry point - reads from environment variables"""
     
     # Read from GitHub Action environment variables
     verbose = os.getenv('LEFTSIZE_VERBOSE', 'false').lower() == 'true'
-    backend_url = os.getenv('LEFTSIZE_BACKEND_URL')
-    installation_id = os.getenv('LEFTSIZE_INSTALLATION_ID')
-    repository_token = os.getenv('LEFTSIZE_REPOSITORY_TOKEN')
+    backend_url = os.getenv('LEFTSIZE_BACKEND_URL', 'https://api.leftsize.io')
+    installation_id = os.getenv('LEFTSIZE_INSTALLATION_ID', '')
+    repository_token = os.getenv('LEFTSIZE_REPOSITORY_TOKEN', '')
     cloud_provider = os.getenv('LEFTSIZE_CLOUD_PROVIDER', 'azure')
     azure_subscription_ids = os.getenv('LEFTSIZE_AZURE_SUBSCRIPTION_IDS', '')
     aws_regions = os.getenv('LEFTSIZE_AWS_REGIONS', '')
@@ -61,6 +141,28 @@ def github_action_main():
     
     logger.info("LeftSize GitHub Action starting", version="1.0.0", cloud_provider=cloud_provider)
     
+    # Validate required inputs
+    if not validate_installation_id(installation_id):
+        logger.error("Invalid installation-id format. Must be numeric.")
+        set_github_output('findings-submitted', 'false')
+        return 1
+    
+    if not validate_repository_token(repository_token):
+        logger.error("Invalid repository-token format. Must be a valid GUID.")
+        set_github_output('findings-submitted', 'false')
+        return 1
+    
+    if not validate_backend_url(backend_url):
+        logger.error("Invalid backend-url format. Must be HTTPS URL.")
+        set_github_output('findings-submitted', 'false')
+        return 1
+    
+    # Validate cloud provider input
+    if cloud_provider not in ['azure', 'aws']:
+        logger.error("Invalid cloud-provider. Must be 'azure' or 'aws'.", provider=cloud_provider)
+        set_github_output('findings-submitted', 'false')
+        return 1
+    
     try:
         # Create minimal configuration from environment variables
         config_data = create_default_config()
@@ -73,22 +175,47 @@ def github_action_main():
         if repository_token:
             config_data.setdefault('output', {})['repository_token'] = repository_token
         
-        # Configure cloud provider targets
+        # Configure cloud provider targets with validation
         if cloud_provider == 'azure':
             if azure_subscription_ids:
                 subs = [s.strip() for s in azure_subscription_ids.split(',') if s.strip()]
+                # Validate each subscription ID
+                invalid_subs = [s for s in subs if not validate_azure_subscription_id(s)]
+                if invalid_subs:
+                    logger.error("Invalid Azure subscription ID(s)", invalid=invalid_subs)
+                    set_github_output('findings-submitted', 'false')
+                    return 1
                 config_data.setdefault('targets', {}).setdefault('azure', {})['subscriptions'] = subs
         elif cloud_provider == 'aws':
             if aws_regions:
                 regions = [r.strip() for r in aws_regions.split(',') if r.strip()]
+                # Validate each region
+                invalid_regions = [r for r in regions if not validate_aws_region(r)]
+                if invalid_regions:
+                    logger.error("Invalid AWS region(s)", invalid=invalid_regions)
+                    set_github_output('findings-submitted', 'false')
+                    return 1
                 config_data.setdefault('targets', {}).setdefault('aws', {})['regions'] = regions
         
-        # Configure policies
+        # Configure policies with validation
         if include_policies:
             categories = [c.strip() for c in include_policies.split(',') if c.strip()]
+            # Validate policy category names
+            invalid_cats = [c for c in categories if not validate_policy_name(c)]
+            if invalid_cats:
+                logger.error("Invalid policy category name(s)", invalid=invalid_cats)
+                set_github_output('findings-submitted', 'false')
+                return 1
             config_data.setdefault('policies', {})['include_categories'] = categories
+            
         if exclude_policies:
             rules = [r.strip() for r in exclude_policies.split(',') if r.strip()]
+            # Validate policy rule names
+            invalid_rules = [r for r in rules if not validate_policy_name(r)]
+            if invalid_rules:
+                logger.error("Invalid policy rule name(s)", invalid=invalid_rules)
+                set_github_output('findings-submitted', 'false')
+                return 1
             config_data.setdefault('policies', {})['exclude_rules'] = rules
         
         # Policies directory (bundled in action)
