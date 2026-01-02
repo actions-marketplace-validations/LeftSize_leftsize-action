@@ -15,8 +15,8 @@ requests==2.32.3
 # JSON schema validation for configuration
 jsonschema==4.23.0
 
-# YAML configuration parsing
-pyyaml==6.0.2
+# YAML configuration parsing - must match Cloud Custodian requirement
+pyyaml==6.0.1
 
 # CLI argument parsing
 click==8.1.7
