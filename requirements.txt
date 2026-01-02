@@ -1,7 +1,6 @@
-# Cloud Custodian - let it manage its own dependencies
-c7n==0.9.40.0
-c7n-azure==0.7.30
+# Cloud Custodian and Azure support
+c7n[azure]==0.9.40.0
 
-# Our dependencies
+# Our dependencies  
 requests==2.32.3
 structlog==24.4.0
