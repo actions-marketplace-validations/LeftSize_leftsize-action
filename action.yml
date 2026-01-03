@@ -64,7 +64,7 @@ outputs:
 
 runs:
   using: 'docker'
-  image: 'docker://ghcr.io/leftsize/leftsize-action:v1'
+  image: 'docker://ghcr.io/leftsize/leftsize-action:1'
   env:
     LEFTSIZE_INSTALLATION_ID: ${{ inputs.installation-id }}
     LEFTSIZE_REPOSITORY_TOKEN: ${{ inputs.repository-token }}
