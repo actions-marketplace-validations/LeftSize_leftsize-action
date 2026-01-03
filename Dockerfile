@@ -7,6 +7,7 @@ LABEL description="LeftSize Cloud Cost Optimization Scanner"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Azure CLI
