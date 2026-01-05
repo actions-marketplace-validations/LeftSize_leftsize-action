@@ -1,5 +1,6 @@
-# Cloud Custodian and Azure support
-c7n[azure]==0.9.40.0
+# Cloud Custodian and cloud provider support
+c7n==0.9.40
+c7n-azure==0.7.47
 
 # Azure SDK packages (for authentication validation)
 azure-identity>=1.15.0
