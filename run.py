@@ -511,15 +511,27 @@ def validate_azure_auth(azure_config: Dict[str, Any]) -> bool:
     try:
         from azure.identity import DefaultAzureCredential
         from azure.mgmt.resource import ResourceManagementClient
+        import subprocess
         
-        # Try to create credentials and test them
+        # Try to create credentials
         credential = DefaultAzureCredential()
         
-        # Test authentication by attempting to list resource groups
+        # Get subscription ID from config or Azure CLI
         subscription_id = azure_config.get('subscriptions', [None])[0]
         if not subscription_id:
-            logger.error("Azure subscription ID not found in configuration. Azure authentication cannot proceed.")
-            return False
+            # Try to get from Azure CLI (already authenticated via OIDC)
+            try:
+                result = subprocess.run(
+                    ['az', 'account', 'show', '--query', 'id', '-o', 'tsv'],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                subscription_id = result.stdout.strip()
+                logger.info("Using Azure CLI default subscription", subscription_id=subscription_id)
+            except Exception as e:
+                logger.error("Azure subscription ID not found in configuration and failed to get from Azure CLI", error=str(e))
+                return False
             
         client = ResourceManagementClient(credential, subscription_id)
         # Just try to get the client - actual API call will be made by Custodian
