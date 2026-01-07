@@ -254,8 +254,12 @@ def github_action_main():
                 submitted = True
                 logger.info("Findings submitted successfully to backend")
             except Exception as e:
-                logger.warning(f"Failed to submit findings to backend: {e}")
-                submitted = False
+                logger.error(f"Failed to submit findings to backend: {e}")
+                set_github_output('findings-count', str(findings_count))
+                set_github_output('findings-submitted', 'false')
+                set_github_output('findings-json', json.dumps(findings, default=str))
+                print_github_summary(findings, submitted=False)
+                return 1
         
         # Set GitHub Action outputs
         set_github_output('findings-count', str(findings_count))
