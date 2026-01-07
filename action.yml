@@ -63,15 +63,46 @@ outputs:
     description: 'JSON string of all findings (for custom processing)'
 
 runs:
-  using: 'docker'
-  image: 'docker://ghcr.io/leftsize/leftsize-action:main'
-  env:
-    LEFTSIZE_INSTALLATION_ID: ${{ inputs.installation-id }}
-    LEFTSIZE_REPOSITORY_TOKEN: ${{ inputs.repository-token }}
-    LEFTSIZE_BACKEND_URL: ${{ inputs.backend-url }}
-    LEFTSIZE_CLOUD_PROVIDER: ${{ inputs.cloud-provider }}
-    LEFTSIZE_AZURE_SUBSCRIPTION_IDS: ${{ inputs.azure-subscription-ids }}
-    LEFTSIZE_AWS_REGIONS: ${{ inputs.aws-regions }}
-    LEFTSIZE_INCLUDE_POLICIES: ${{ inputs.include-policies }}
-    LEFTSIZE_EXCLUDE_POLICIES: ${{ inputs.exclude-policies }}
-    LEFTSIZE_VERBOSE: ${{ inputs.verbose }}
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      shell: bash
+      run: |
+        pip install --no-cache-dir -r "${{ github.action_path }}/requirements.txt"
+    
+    - name: Run LeftSize Scan
+      shell: bash
+      env:
+        LEFTSIZE_INSTALLATION_ID: ${{ inputs.installation-id }}
+        LEFTSIZE_REPOSITORY_TOKEN: ${{ inputs.repository-token }}
+        LEFTSIZE_BACKEND_URL: ${{ inputs.backend-url }}
+        LEFTSIZE_CLOUD_PROVIDER: ${{ inputs.cloud-provider }}
+        LEFTSIZE_AZURE_SUBSCRIPTION_IDS: ${{ inputs.azure-subscription-ids }}
+        LEFTSIZE_AWS_REGIONS: ${{ inputs.aws-regions }}
+        LEFTSIZE_INCLUDE_POLICIES: ${{ inputs.include-policies }}
+        LEFTSIZE_EXCLUDE_POLICIES: ${{ inputs.exclude-policies }}
+        LEFTSIZE_VERBOSE: ${{ inputs.verbose }}
+      run: |
+        echo "::group::LeftSize Cloud Cost Optimization Scanner"
+        echo "Starting LeftSize scan..."
+        echo "Cloud Provider: ${LEFTSIZE_CLOUD_PROVIDER}"
+        echo "Verbose: ${LEFTSIZE_VERBOSE}"
+        echo "::endgroup::"
+        
+        # Run the Python scanner
+        python3 "${{ github.action_path }}/run.py"
+        
+        # Capture exit code
+        EXIT_CODE=$?
+        
+        if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ LeftSize scan completed successfully"
+        else
+            echo "❌ LeftSize scan failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
+        fi
