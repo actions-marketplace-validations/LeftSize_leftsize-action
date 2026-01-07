@@ -901,19 +901,23 @@ def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         key = (finding['ruleId'], finding['scope'])
         
         if key not in groups:
-            # Determine severity from rule ID patterns or metadata
-            severity = determine_severity(finding['ruleId'], finding.get('metadata', {}))
-            
             groups[key] = {
                 'RuleId': finding['ruleId'],  # Use PascalCase to match backend expectation
                 'Scope': finding['scope'],
-                'Severity': severity,  # Required by backend
                 'Findings': []
             }
         
+        # Determine severity for each individual finding
+        severity = determine_severity(finding['ruleId'], finding.get('metadata', {}))
+        
         # Convert to backend expected format (PascalCase)
+        # Each finding needs: RuleId, ResourceId, Scope, EstSavings, Severity, Metadata
         backend_finding = {
+            'RuleId': finding['ruleId'],
             'ResourceId': finding['resourceId'],
+            'Scope': finding['scope'],
+            'EstSavings': finding.get('estimatedSavings', 0),
+            'Severity': severity,
             'Metadata': finding.get('metadata')
         }
         
