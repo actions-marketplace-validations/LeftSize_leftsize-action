@@ -901,9 +901,13 @@ def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         key = (finding['ruleId'], finding['scope'])
         
         if key not in groups:
+            # Determine severity from rule ID patterns or metadata
+            severity = determine_severity(finding['ruleId'], finding.get('metadata', {}))
+            
             groups[key] = {
                 'RuleId': finding['ruleId'],  # Use PascalCase to match backend expectation
                 'Scope': finding['scope'],
+                'Severity': severity,  # Required by backend
                 'Findings': []
             }
         
@@ -916,6 +920,40 @@ def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         groups[key]['Findings'].append(backend_finding)
     
     return list(groups.values())
+
+
+def determine_severity(rule_id: str, metadata: Dict[str, Any]) -> str:
+    """Determine severity based on rule ID patterns and metadata"""
+    
+    # Check if severity is in metadata (from resource tags)
+    if metadata:
+        if 'leftsize-severity' in metadata:
+            return metadata['leftsize-severity'].lower()
+        # Check tags dict if present
+        tags = metadata.get('tags', {})
+        if isinstance(tags, dict) and 'leftsize-severity' in tags:
+            return tags['leftsize-severity'].lower()
+    
+    rule_lower = rule_id.lower()
+    
+    # Critical: Security issues with direct data breach risk
+    if any(kw in rule_lower for kw in ['anonymous', 'public-access', 'unencrypted', 'no-encryption']):
+        return 'critical'
+    
+    # High: Security misconfigurations, missing critical tags
+    if any(kw in rule_lower for kw in ['security', 'exposed', 'open-', 'unrestricted']):
+        return 'high'
+    
+    # Medium: Governance issues, missing tags, cost optimization
+    if any(kw in rule_lower for kw in ['missing-', 'untagged', 'idle', 'unused', 'governance']):
+        return 'medium'
+    
+    # Low: Minor issues, recommendations
+    if any(kw in rule_lower for kw in ['recommend', 'suggest', 'consider']):
+        return 'low'
+    
+    # Default to medium for cost optimization findings
+    return 'medium'
 
 
 def save_local_output(findings: List[Dict[str, Any]], output_config: Dict[str, Any]) -> None:
