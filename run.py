@@ -167,6 +167,9 @@ def github_action_main():
         # Create minimal configuration from environment variables
         config_data = create_default_config()
         
+        # Store cloud provider in config for policy filtering
+        config_data['cloud_provider'] = cloud_provider
+        
         # Override with environment variables
         if backend_url:
             config_data.setdefault('output', {})['backend_url'] = backend_url
@@ -532,21 +535,29 @@ def execute_custodian_policies(policies_dir: str, config: Dict[str, Any]) -> Lis
     """Execute Cloud Custodian policies and collect findings"""
     logger.info("Executing Cloud Custodian policies", policies_dir=policies_dir)
     
+    # Get cloud provider to filter policies
+    cloud_provider = config.get('cloud_provider', 'azure')
+    
     # Determine which policy files to run
     policy_files = config.get('policies', {}).get('policy_files', [])
     
     if not policy_files:
-        # Default: auto-discover all policy files
-        logger.info("No policy files specified, auto-discovering...")
+        # Default: auto-discover policy files matching cloud provider
+        logger.info("Auto-discovering policy files for provider", provider=cloud_provider)
         policy_files = []
         for file in Path(policies_dir).glob('*.yml'):
             # Skip example files
-            if 'example' not in file.name.lower():
-                policy_files.append(file.name)
-                logger.info("Discovered policy file", file=file.name)
+            if 'example' in file.name.lower():
+                continue
+            # Filter by cloud provider prefix
+            if cloud_provider == 'azure' and file.name.startswith('aws-'):
+                continue
+            if cloud_provider == 'aws' and file.name.startswith('azure-'):
+                continue
+            policy_files.append(file.name)
         
         if not policy_files:
-            logger.error("No policy files found in directory", policies_dir=policies_dir)
+            logger.error("No policy files found for provider", provider=cloud_provider, policies_dir=policies_dir)
             return []
     
     logger.info("Running policy files", files=policy_files, count=len(policy_files))
@@ -878,7 +889,7 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         
     except Exception as e:
         logger.error("Failed to submit findings to backend", error=str(e))
-        # Don't fail the entire run if submission fails
+        raise  # Re-raise to allow caller to handle
 
 
 def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
