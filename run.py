@@ -125,7 +125,7 @@ def github_action_main():
     
     # Read from GitHub Action environment variables
     verbose = os.getenv('LEFTSIZE_VERBOSE', 'false').lower() == 'true'
-    backend_url = os.getenv('LEFTSIZE_BACKEND_URL', 'https://api.leftsize.io')
+    backend_url = os.getenv('LEFTSIZE_BACKEND_URL', 'https://api.leftsize.com')
     installation_id = os.getenv('LEFTSIZE_INSTALLATION_ID', '')
     repository_token = os.getenv('LEFTSIZE_REPOSITORY_TOKEN', '')
     cloud_provider = os.getenv('LEFTSIZE_CLOUD_PROVIDER', 'azure')

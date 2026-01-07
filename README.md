@@ -76,7 +76,7 @@ jobs:
 |-------|----------|---------|-------------|
 | `installation-id` | ✅ Yes | - | GitHub App installation ID from LeftSize onboarding |
 | `repository-token` | ✅ Yes | - | Secure repository token from LeftSize onboarding |
-| `backend-url` | No | `https://api.leftsize.io` | LeftSize backend API URL |
+| `backend-url` | No | `https://api.leftsize.com` | LeftSize backend API URL |
 | `cloud-provider` | No | `azure` | Cloud provider: `azure` or `aws` |
 | `azure-subscription-ids` | No | All accessible | Comma-separated Azure subscription IDs to scan |
 | `aws-regions` | No | All accessible | Comma-separated AWS regions to scan |
@@ -336,7 +336,7 @@ This is normal! It means your infrastructure is well-optimized. The action will 
 Check:
 1. `LEFTSIZE_INSTALLATION_ID` is correct
 2. `LEFTSIZE_REPOSITORY_TOKEN` matches your repository
-3. Backend URL is reachable (`https://api.leftsize.io`)
+3. Backend URL is reachable (`https://api.leftsize.com`)
 
 Findings are saved as artifacts even if submission fails.
 

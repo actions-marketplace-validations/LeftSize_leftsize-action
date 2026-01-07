@@ -19,7 +19,7 @@ inputs:
   backend-url:
     description: 'LeftSize backend API URL'
     required: false
-    default: 'https://api.leftsize.io'
+    default: 'https://api.leftsize.com'
   
   # Cloud provider configuration
   cloud-provider:
