@@ -868,13 +868,15 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         # Group findings by rule and scope (as expected by backend)
         finding_groups = group_findings(findings)
         
-        # Submit to backend - URL now includes both installationId and repositoryToken
-        url = f"{backend_url}/findings/{installation_id}/{repository_token}"
+        # Submit to backend - token passed via Authorization header (not in URL for security)
+        url = f"{backend_url}/findings/{installation_id}"
         headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'LeftSize-Runner/1.0'
+            'User-Agent': 'LeftSize-Runner/1.0',
+            'Authorization': f'Bearer {repository_token}'
         }
         
+        # Log URL without sensitive token
         logger.info("Submitting findings to backend", 
                    url=url, 
                    finding_groups=len(finding_groups),
