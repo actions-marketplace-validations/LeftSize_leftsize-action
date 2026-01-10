@@ -59,6 +59,11 @@ inputs:
     description: 'Comma-separated AWS regions to scan (empty = all accessible)'
     required: false
   
+  # Currency configuration
+  currency:
+    description: 'Currency code for cost display (e.g., EUR, USD, GBP). Auto-detected from Azure if not specified.'
+    required: false
+  
   # Policy configuration
   include-policies:
     description: 'Comma-separated policy categories to include (e.g., cost-optimization,governance,security)'
@@ -144,6 +149,7 @@ runs:
         LEFTSIZE_CLOUD_PROVIDER: ${{ inputs.cloud-provider }}
         LEFTSIZE_AZURE_SUBSCRIPTION_IDS: ${{ inputs.azure-subscription-ids }}
         LEFTSIZE_AWS_REGIONS: ${{ inputs.aws-regions }}
+        LEFTSIZE_CURRENCY: ${{ inputs.currency }}
         LEFTSIZE_INCLUDE_POLICIES: ${{ inputs.include-policies }}
         LEFTSIZE_EXCLUDE_POLICIES: ${{ inputs.exclude-policies }}
         LEFTSIZE_VERBOSE: ${{ inputs.verbose }}

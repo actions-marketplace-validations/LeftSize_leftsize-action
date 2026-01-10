@@ -131,6 +131,7 @@ def github_action_main():
     cloud_provider = os.getenv('LEFTSIZE_CLOUD_PROVIDER', 'azure')
     azure_subscription_ids = os.getenv('LEFTSIZE_AZURE_SUBSCRIPTION_IDS', '')
     aws_regions = os.getenv('LEFTSIZE_AWS_REGIONS', '')
+    currency = os.getenv('LEFTSIZE_CURRENCY', '')
     include_policies = os.getenv('LEFTSIZE_INCLUDE_POLICIES', '')
     exclude_policies = os.getenv('LEFTSIZE_EXCLUDE_POLICIES', '')
     
@@ -231,9 +232,22 @@ def github_action_main():
                 set_github_output('findings-submitted', 'false')
                 logger.error("Azure authentication failed. Please configure Azure credentials.")
                 return 1
+            
+            # Detect or use provided currency
+            if currency:
+                detected_currency = currency.upper()
+                logger.info("Using provided currency", currency=detected_currency)
+            else:
+                # Try to detect from Azure subscription
+                subs = azure_config.get('subscriptions', [])
+                sub_id = subs[0] if subs else None
+                detected_currency = detect_azure_currency(sub_id)
+            config_data['currency'] = detected_currency
+            
         elif cloud_provider == 'aws':
             # AWS auth validation handled by boto3/AWS CLI
-            pass
+            # AWS defaults to USD
+            config_data['currency'] = currency.upper() if currency else 'USD'
         
         # Execute Cloud Custodian policies
         findings = execute_custodian_policies(policies_dir, config_data)
@@ -529,6 +543,91 @@ def validate_azure_auth(azure_config: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error("Azure authentication validation failed", error=str(e))
         return False
+
+
+def detect_azure_currency(subscription_id: str = None) -> str:
+    """
+    Detect billing currency from Azure subscription.
+    Tries to get currency from the Consumption API Price Sheet.
+    Falls back to USD if detection fails.
+    """
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.mgmt.resource import SubscriptionClient
+        import requests as req
+        
+        credential = DefaultAzureCredential()
+        
+        # Get subscription ID if not provided
+        if not subscription_id:
+            sub_client = SubscriptionClient(credential)
+            subs = list(sub_client.subscriptions.list())
+            if subs:
+                subscription_id = subs[0].subscription_id
+            else:
+                logger.warning("No Azure subscriptions found, defaulting to USD")
+                return "USD"
+        
+        # Get access token for Azure Resource Manager
+        token = credential.get_token("https://management.azure.com/.default")
+        
+        # Try to get currency from Consumption Price Sheet API
+        # This returns prices with currency info
+        url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Consumption/pricesheets/default?api-version=2023-05-01&$top=1"
+        headers = {
+            "Authorization": f"Bearer {token.token}",
+            "Content-Type": "application/json"
+        }
+        
+        response = req.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Price sheet items have 'currencyCode' field
+            pricesheets = data.get('properties', {}).get('pricesheets', [])
+            if pricesheets and len(pricesheets) > 0:
+                currency = pricesheets[0].get('currencyCode', 'USD')
+                logger.info("Detected Azure billing currency", currency=currency, subscription_id=subscription_id)
+                return currency
+        
+        # If price sheet didn't work, try Cost Management API
+        # Query for a small cost amount to get the currency
+        cost_url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.CostManagement/query?api-version=2023-03-01"
+        cost_body = {
+            "type": "ActualCost",
+            "timeframe": "MonthToDate",
+            "dataset": {
+                "granularity": "None",
+                "aggregation": {
+                    "totalCost": {"name": "Cost", "function": "Sum"}
+                }
+            }
+        }
+        
+        response = req.post(cost_url, headers=headers, json=cost_body, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Cost response has currency in properties
+            columns = data.get('properties', {}).get('columns', [])
+            for col in columns:
+                if col.get('name') == 'Currency':
+                    rows = data.get('properties', {}).get('rows', [])
+                    if rows and len(rows) > 0:
+                        # Find currency column index
+                        currency_idx = next((i for i, c in enumerate(columns) if c.get('name') == 'Currency'), -1)
+                        if currency_idx >= 0 and len(rows[0]) > currency_idx:
+                            currency = rows[0][currency_idx]
+                            logger.info("Detected Azure billing currency from Cost Management", currency=currency)
+                            return currency
+        
+        logger.warning("Could not detect Azure currency, defaulting to USD", 
+                      status_code=response.status_code if 'response' in dir() else 'N/A')
+        return "USD"
+        
+    except Exception as e:
+        logger.warning("Failed to detect Azure currency, defaulting to USD", error=str(e))
+        return "USD"
 
 
 def execute_custodian_policies(policies_dir: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -865,8 +964,11 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         return
     
     try:
+        # Get currency from config
+        currency = config.get('currency', 'USD')
+        
         # Group findings by rule and scope (as expected by backend)
-        finding_groups = group_findings(findings)
+        finding_groups = group_findings(findings, currency)
         
         # Submit to backend - token passed via Authorization header (not in URL for security)
         url = f"{backend_url}/findings/{installation_id}"
@@ -880,7 +982,8 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         logger.info("Submitting findings to backend", 
                    url=url, 
                    finding_groups=len(finding_groups),
-                   total_findings=len(findings))
+                   total_findings=len(findings),
+                   currency=currency)
         
         response = requests.post(url, json=finding_groups, headers=headers, timeout=30)
         response.raise_for_status()
@@ -894,7 +997,7 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         raise  # Re-raise to allow caller to handle
 
 
-def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def group_findings(findings: List[Dict[str, Any]], currency: str = 'USD') -> List[Dict[str, Any]]:
     """Group findings by rule ID and scope for backend submission"""
     
     groups = {}
@@ -906,6 +1009,7 @@ def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             groups[key] = {
                 'RuleId': finding['ruleId'],  # Use PascalCase to match backend expectation
                 'Scope': finding['scope'],
+                'Currency': currency,  # Include currency in the group
                 'Findings': []
             }
         
