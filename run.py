@@ -985,6 +985,14 @@ def save_local_output(findings: List[Dict[str, Any]], output_config: Dict[str, A
 if __name__ == "__main__":
     # Check if running in GitHub Actions
     if os.getenv('GITHUB_ACTIONS') == 'true':
-        sys.exit(github_action_main())
+        # Check mode
+        mode = os.getenv('LEFTSIZE_MODE', 'scan').lower()
+        if mode == 'stats':
+            # Import and run stats mode
+            from stats import stats_main
+            sys.exit(stats_main())
+        else:
+            # Default: scan mode
+            sys.exit(github_action_main())
     else:
         sys.exit(main())

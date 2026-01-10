@@ -6,6 +6,12 @@ branding:
   color: 'blue'
 
 inputs:
+  # Mode selection
+  mode:
+    description: 'Action mode: scan (default) or stats'
+    required: false
+    default: 'scan'
+  
   # Required inputs
   installation-id:
     description: 'GitHub App installation ID (from LeftSize onboarding)'
@@ -21,7 +27,23 @@ inputs:
     required: false
     default: 'https://api.leftsize.com'
   
-  # Cloud provider configuration
+  # Stats mode inputs
+  period:
+    description: 'Stats period: 7d, 30d, 90d, or all (stats mode only)'
+    required: false
+    default: '30d'
+  
+  format:
+    description: 'Output format: json or markdown (stats mode only)'
+    required: false
+    default: 'markdown'
+  
+  report:
+    description: 'Report type: summary, detailed, or executive (stats mode only)'
+    required: false
+    default: 'summary'
+  
+  # Cloud provider configuration (scan mode)
   cloud-provider:
     description: 'Cloud provider to scan (azure or aws)'
     required: false
@@ -53,14 +75,39 @@ inputs:
     default: 'false'
 
 outputs:
+  # Scan mode outputs
   findings-count:
-    description: 'Total number of findings detected'
+    description: 'Total number of findings detected (scan mode)'
+    value: ${{ steps.run.outputs.findings-count }}
   
   findings-submitted:
-    description: 'Whether findings were successfully submitted to backend'
+    description: 'Whether findings were successfully submitted to backend (scan mode)'
+    value: ${{ steps.run.outputs.findings-submitted }}
   
   findings-json:
-    description: 'JSON string of all findings (for custom processing)'
+    description: 'JSON string of all findings (scan mode)'
+    value: ${{ steps.run.outputs.findings-json }}
+  
+  # Stats mode outputs
+  report:
+    description: 'Generated report content (stats mode, markdown or json)'
+    value: ${{ steps.run.outputs.report }}
+  
+  stats-json:
+    description: 'Raw statistics as JSON (stats mode)'
+    value: ${{ steps.run.outputs.stats-json }}
+  
+  fix-ratio:
+    description: 'Fix ratio percentage (stats mode)'
+    value: ${{ steps.run.outputs.fix-ratio }}
+  
+  potential-savings:
+    description: 'Potential monthly savings (stats mode)'
+    value: ${{ steps.run.outputs.potential-savings }}
+  
+  realized-savings:
+    description: 'Realized monthly savings (stats mode)'
+    value: ${{ steps.run.outputs.realized-savings }}
 
 runs:
   using: 'composite'
@@ -83,12 +130,17 @@ runs:
       run: |
         pip install --quiet -r "${{ github.action_path }}/requirements.txt"
     
-    - name: Run LeftSize Scan
+    - name: Run LeftSize
+      id: run
       shell: bash
       env:
+        LEFTSIZE_MODE: ${{ inputs.mode }}
         LEFTSIZE_INSTALLATION_ID: ${{ inputs.installation-id }}
         LEFTSIZE_REPOSITORY_TOKEN: ${{ inputs.repository-token }}
         LEFTSIZE_BACKEND_URL: ${{ inputs.backend-url }}
+        LEFTSIZE_PERIOD: ${{ inputs.period }}
+        LEFTSIZE_FORMAT: ${{ inputs.format }}
+        LEFTSIZE_REPORT: ${{ inputs.report }}
         LEFTSIZE_CLOUD_PROVIDER: ${{ inputs.cloud-provider }}
         LEFTSIZE_AZURE_SUBSCRIPTION_IDS: ${{ inputs.azure-subscription-ids }}
         LEFTSIZE_AWS_REGIONS: ${{ inputs.aws-regions }}
@@ -96,19 +148,35 @@ runs:
         LEFTSIZE_EXCLUDE_POLICIES: ${{ inputs.exclude-policies }}
         LEFTSIZE_VERBOSE: ${{ inputs.verbose }}
       run: |
-        echo "::group::LeftSize Cloud Cost Optimization Scanner"
-        echo "Cloud Provider: ${LEFTSIZE_CLOUD_PROVIDER}"
-        echo "::endgroup::"
+        MODE="${LEFTSIZE_MODE:-scan}"
         
-        # Run the Python scanner
+        if [ "$MODE" = "stats" ]; then
+          echo "::group::LeftSize Statistics Report"
+          echo "Mode: stats"
+          echo "Period: ${LEFTSIZE_PERIOD}"
+          echo "Format: ${LEFTSIZE_FORMAT}"
+          echo "Report: ${LEFTSIZE_REPORT}"
+          echo "::endgroup::"
+        else
+          echo "::group::LeftSize Cloud Cost Optimization Scanner"
+          echo "Mode: scan"
+          echo "Cloud Provider: ${LEFTSIZE_CLOUD_PROVIDER}"
+          echo "::endgroup::"
+        fi
+        
+        # Run the Python runner
         python3 "${{ github.action_path }}/run.py"
         
         # Capture exit code
         EXIT_CODE=$?
         
         if [ $EXIT_CODE -eq 0 ]; then
+          if [ "$MODE" = "stats" ]; then
+            echo "✅ LeftSize stats completed successfully"
+          else
             echo "✅ LeftSize scan completed successfully"
+          fi
         else
-            echo "❌ LeftSize scan failed with exit code $EXIT_CODE"
-            exit $EXIT_CODE
+          echo "❌ LeftSize failed with exit code $EXIT_CODE"
+          exit $EXIT_CODE
         fi
