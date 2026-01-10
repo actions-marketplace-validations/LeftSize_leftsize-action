@@ -106,17 +106,52 @@ def extract_key_metrics(stats: Dict[str, Any]) -> Dict[str, Any]:
         return {
             'fix_ratio': '0',
             'potential_savings': '0',
-            'realized_savings': '0'
+            'realized_savings': '0',
+            'currency': 'USD',
+            'currency_symbol': '$'
         }
     
     overview = stats.get('Overview', {})
     savings = stats.get('Savings', {})
+    currency = savings.get('Currency', 'USD')
     
     return {
         'fix_ratio': str(round(overview.get('FixRatio', 0) * 100, 1)),
         'potential_savings': str(round(savings.get('PotentialMonthlySavings', 0), 2)),
-        'realized_savings': str(round(savings.get('RealizedMonthlySavings', 0), 2))
+        'realized_savings': str(round(savings.get('RealizedMonthlySavings', 0), 2)),
+        'currency': currency,
+        'currency_symbol': get_currency_symbol(currency)
     }
+
+
+def get_currency_symbol(currency_code: str) -> str:
+    """
+    Get currency symbol for a given currency code
+    """
+    symbols = {
+        'EUR': '€',
+        'GBP': '£',
+        'JPY': '¥',
+        'CHF': 'CHF',
+        'CAD': 'CA$',
+        'AUD': 'A$',
+        'SEK': 'kr',
+        'NOK': 'kr',
+        'DKK': 'kr',
+        'PLN': 'zł',
+        'CZK': 'Kč',
+        'HUF': 'Ft',
+        'INR': '₹',
+        'BRL': 'R$',
+        'MXN': 'MX$',
+        'ZAR': 'R',
+        'SGD': 'S$',
+        'HKD': 'HK$',
+        'NZD': 'NZ$',
+        'KRW': '₩',
+        'USD': '$'
+    }
+    return symbols.get(currency_code.upper() if currency_code else 'USD', '$')
 
 
 def get_repo_info() -> tuple[str, str]:
@@ -222,6 +257,8 @@ def stats_main() -> int:
         set_github_output('fix-ratio', '0')
         set_github_output('potential-savings', '0')
         set_github_output('realized-savings', '0')
+        set_github_output('currency', 'USD')
+        set_github_output('currency-symbol', '$')
         return 1
     
     # Set GitHub Action outputs
@@ -236,6 +273,8 @@ def stats_main() -> int:
         set_github_output('fix-ratio', metrics['fix_ratio'])
         set_github_output('potential-savings', metrics['potential_savings'])
         set_github_output('realized-savings', metrics['realized_savings'])
+        set_github_output('currency', metrics['currency'])
+        set_github_output('currency-symbol', metrics['currency_symbol'])
     else:
         # For markdown format, we need to make another request to get raw stats
         # for the additional outputs
@@ -256,11 +295,15 @@ def stats_main() -> int:
             set_github_output('fix-ratio', metrics['fix_ratio'])
             set_github_output('potential-savings', metrics['potential_savings'])
             set_github_output('realized-savings', metrics['realized_savings'])
+            set_github_output('currency', metrics['currency'])
+            set_github_output('currency-symbol', metrics['currency_symbol'])
         else:
             set_github_output('stats-json', '{}')
             set_github_output('fix-ratio', '0')
             set_github_output('potential-savings', '0')
             set_github_output('realized-savings', '0')
+            set_github_output('currency', 'USD')
+            set_github_output('currency-symbol', '$')
     
     # Print summary to GitHub Actions job summary
     print_stats_summary(report_content, format)

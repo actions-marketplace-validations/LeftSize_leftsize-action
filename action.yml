@@ -113,6 +113,14 @@ outputs:
   realized-savings:
     description: 'Realized monthly savings (stats mode)'
     value: ${{ steps.run.outputs.realized-savings }}
+  
+  currency:
+    description: 'Currency code used for savings (stats mode, e.g., EUR, USD)'
+    value: ${{ steps.run.outputs.currency }}
+  
+  currency-symbol:
+    description: 'Currency symbol for display (stats mode, e.g., €, $)'
+    value: ${{ steps.run.outputs.currency-symbol }}
 
 runs:
   using: 'composite'
