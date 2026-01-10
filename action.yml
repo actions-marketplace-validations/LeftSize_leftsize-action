@@ -19,7 +19,7 @@ inputs:
   backend-url:
     description: 'LeftSize backend API URL'
     required: false
-    default: 'https://api.leftsize.io'
+    default: 'https://api.leftsize.com'
   
   # Cloud provider configuration
   cloud-provider:
@@ -70,10 +70,18 @@ runs:
       with:
         python-version: '3.11'
     
+    - name: Cache pip dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-leftsize-${{ hashFiles(format('{0}/requirements.txt', github.action_path)) }}
+        restore-keys: |
+          ${{ runner.os }}-pip-leftsize-
+    
     - name: Install dependencies
       shell: bash
       run: |
-        pip install --no-cache-dir -r "${{ github.action_path }}/requirements.txt"
+        pip install --quiet -r "${{ github.action_path }}/requirements.txt"
     
     - name: Run LeftSize Scan
       shell: bash
@@ -89,9 +97,7 @@ runs:
         LEFTSIZE_VERBOSE: ${{ inputs.verbose }}
       run: |
         echo "::group::LeftSize Cloud Cost Optimization Scanner"
-        echo "Starting LeftSize scan..."
         echo "Cloud Provider: ${LEFTSIZE_CLOUD_PROVIDER}"
-        echo "Verbose: ${LEFTSIZE_VERBOSE}"
         echo "::endgroup::"
         
         # Run the Python scanner

@@ -125,7 +125,7 @@ def github_action_main():
     
     # Read from GitHub Action environment variables
     verbose = os.getenv('LEFTSIZE_VERBOSE', 'false').lower() == 'true'
-    backend_url = os.getenv('LEFTSIZE_BACKEND_URL', 'https://api.leftsize.io')
+    backend_url = os.getenv('LEFTSIZE_BACKEND_URL', 'https://api.leftsize.com')
     installation_id = os.getenv('LEFTSIZE_INSTALLATION_ID', '')
     repository_token = os.getenv('LEFTSIZE_REPOSITORY_TOKEN', '')
     cloud_provider = os.getenv('LEFTSIZE_CLOUD_PROVIDER', 'azure')
@@ -166,6 +166,9 @@ def github_action_main():
     try:
         # Create minimal configuration from environment variables
         config_data = create_default_config()
+        
+        # Store cloud provider in config for policy filtering
+        config_data['cloud_provider'] = cloud_provider
         
         # Override with environment variables
         if backend_url:
@@ -254,8 +257,12 @@ def github_action_main():
                 submitted = True
                 logger.info("Findings submitted successfully to backend")
             except Exception as e:
-                logger.warning(f"Failed to submit findings to backend: {e}")
-                submitted = False
+                logger.error(f"Failed to submit findings to backend: {e}")
+                set_github_output('findings-count', str(findings_count))
+                set_github_output('findings-submitted', 'false')
+                set_github_output('findings-json', json.dumps(findings, default=str))
+                print_github_summary(findings, submitted=False)
+                return 1
         
         # Set GitHub Action outputs
         set_github_output('findings-count', str(findings_count))
@@ -528,21 +535,29 @@ def execute_custodian_policies(policies_dir: str, config: Dict[str, Any]) -> Lis
     """Execute Cloud Custodian policies and collect findings"""
     logger.info("Executing Cloud Custodian policies", policies_dir=policies_dir)
     
+    # Get cloud provider to filter policies
+    cloud_provider = config.get('cloud_provider', 'azure')
+    
     # Determine which policy files to run
     policy_files = config.get('policies', {}).get('policy_files', [])
     
     if not policy_files:
-        # Default: auto-discover all policy files
-        logger.info("No policy files specified, auto-discovering...")
+        # Default: auto-discover policy files matching cloud provider
+        logger.info("Auto-discovering policy files for provider", provider=cloud_provider)
         policy_files = []
         for file in Path(policies_dir).glob('*.yml'):
             # Skip example files
-            if 'example' not in file.name.lower():
-                policy_files.append(file.name)
-                logger.info("Discovered policy file", file=file.name)
+            if 'example' in file.name.lower():
+                continue
+            # Filter by cloud provider prefix
+            if cloud_provider == 'azure' and file.name.startswith('aws-'):
+                continue
+            if cloud_provider == 'aws' and file.name.startswith('azure-'):
+                continue
+            policy_files.append(file.name)
         
         if not policy_files:
-            logger.error("No policy files found in directory", policies_dir=policies_dir)
+            logger.error("No policy files found for provider", provider=cloud_provider, policies_dir=policies_dir)
             return []
     
     logger.info("Running policy files", files=policy_files, count=len(policy_files))
@@ -853,13 +868,15 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         # Group findings by rule and scope (as expected by backend)
         finding_groups = group_findings(findings)
         
-        # Submit to backend - URL now includes both installationId and repositoryToken
-        url = f"{backend_url}/findings/{installation_id}/{repository_token}"
+        # Submit to backend - token passed via Authorization header (not in URL for security)
+        url = f"{backend_url}/findings/{installation_id}"
         headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'LeftSize-Runner/1.0'
+            'User-Agent': 'LeftSize-Runner/1.0',
+            'Authorization': f'Bearer {repository_token}'
         }
         
+        # Log URL without sensitive token
         logger.info("Submitting findings to backend", 
                    url=url, 
                    finding_groups=len(finding_groups),
@@ -874,7 +891,7 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         
     except Exception as e:
         logger.error("Failed to submit findings to backend", error=str(e))
-        # Don't fail the entire run if submission fails
+        raise  # Re-raise to allow caller to handle
 
 
 def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -892,15 +909,57 @@ def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 'Findings': []
             }
         
+        # Determine severity for each individual finding
+        severity = determine_severity(finding['ruleId'], finding.get('metadata', {}))
+        
         # Convert to backend expected format (PascalCase)
+        # Each finding needs: RuleId, ResourceId, Scope, EstSavings, Severity, Metadata
         backend_finding = {
+            'RuleId': finding['ruleId'],
             'ResourceId': finding['resourceId'],
+            'Scope': finding['scope'],
+            'EstSavings': finding.get('estimatedSavings', 0),
+            'Severity': severity,
             'Metadata': finding.get('metadata')
         }
         
         groups[key]['Findings'].append(backend_finding)
     
     return list(groups.values())
+
+
+def determine_severity(rule_id: str, metadata: Dict[str, Any]) -> str:
+    """Determine severity based on rule ID patterns and metadata"""
+    
+    # Check if severity is in metadata (from resource tags)
+    if metadata:
+        if 'leftsize-severity' in metadata:
+            return metadata['leftsize-severity'].lower()
+        # Check tags dict if present
+        tags = metadata.get('tags', {})
+        if isinstance(tags, dict) and 'leftsize-severity' in tags:
+            return tags['leftsize-severity'].lower()
+    
+    rule_lower = rule_id.lower()
+    
+    # Critical: Security issues with direct data breach risk
+    if any(kw in rule_lower for kw in ['anonymous', 'public-access', 'unencrypted', 'no-encryption']):
+        return 'critical'
+    
+    # High: Security misconfigurations, missing critical tags
+    if any(kw in rule_lower for kw in ['security', 'exposed', 'open-', 'unrestricted']):
+        return 'high'
+    
+    # Medium: Governance issues, missing tags, cost optimization
+    if any(kw in rule_lower for kw in ['missing-', 'untagged', 'idle', 'unused', 'governance']):
+        return 'medium'
+    
+    # Low: Minor issues, recommendations
+    if any(kw in rule_lower for kw in ['recommend', 'suggest', 'consider']):
+        return 'low'
+    
+    # Default to medium for cost optimization findings
+    return 'medium'
 
 
 def save_local_output(findings: List[Dict[str, Any]], output_config: Dict[str, Any]) -> None:

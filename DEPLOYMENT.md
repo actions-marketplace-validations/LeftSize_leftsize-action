@@ -143,7 +143,7 @@ act workflow_dispatch
     installation-id: ${{ secrets.LEFTSIZE_INSTALLATION_ID }}
     repository-token: ${{ secrets.LEFTSIZE_REPOSITORY_TOKEN }}
     azure-subscription-ids: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-    backend-url: https://api.leftsize.io  # or your test backend
+    backend-url: https://api.leftsize.com  # or your test backend
     verbose: true
 ```
 

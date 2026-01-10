@@ -149,7 +149,7 @@ leftsize-action/
 |-------|----------|------|---------|
 | `installation-id` | ✅ | string | - |
 | `repository-token` | ✅ | string | - |
-| `backend-url` | ❌ | string | `https://api.leftsize.io` |
+| `backend-url` | ❌ | string | `https://api.leftsize.com` |
 | `cloud-provider` | ❌ | enum | `azure` |
 | `azure-subscription-ids` | ❌ | csv | all accessible |
 | `aws-regions` | ❌ | csv | all accessible |
