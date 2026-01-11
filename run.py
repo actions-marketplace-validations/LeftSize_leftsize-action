@@ -745,9 +745,23 @@ def execute_single_policy_file(policies_file: str, config: Dict[str, Any]) -> Li
 
 
 def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> str:
-    """Build LeftSize scope from Azure resource ID"""
+    """Build LeftSize scope from resource ID - handles Azure and AWS formats"""
+    cloud_provider = config.get('cloud_provider', 'azure')
+    
     try:
-        # Parse Azure resource ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
+        if cloud_provider == 'aws':
+            # AWS ARN format: arn:aws:service:region:account:resource
+            if resource_id.startswith('arn:aws:'):
+                parts = resource_id.split(':')
+                if len(parts) >= 4:
+                    region = parts[3] or os.getenv('AWS_REGION', 'us-east-1')
+                    return f"aws:region/{region}"
+            # Fallback for non-ARN AWS resources
+            regions = config.get('targets', {}).get('aws', {}).get('regions', [])
+            region = regions[0] if regions else os.getenv('AWS_REGION', 'us-east-1')
+            return f"aws:region/{region}"
+        
+        # Azure resource ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
         parts = resource_id.split('/')
         if len(parts) >= 5 and parts[1] == 'subscriptions':
             subscription_id = parts[2]
@@ -759,6 +773,8 @@ def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> st
             return f"azure:subscription/{subscription_id}"
     except Exception:
         # Final fallback - ensure we never return None
+        if cloud_provider == 'aws':
+            return f"aws:region/{os.getenv('AWS_REGION', 'us-east-1')}"
         subscription_id = get_subscription_id(config) or 'unknown'
         return f"azure:subscription/{subscription_id}"
 
@@ -819,6 +835,73 @@ def parse_custodian_output(output_dir: str, config: Dict[str, Any]) -> List[Dict
     return findings
 
 
+def extract_resource_id(resource: Dict[str, Any], config: Dict[str, Any]) -> str:
+    """Extract resource ID from Cloud Custodian resource - handles Azure and AWS formats"""
+    
+    cloud_provider = config.get('cloud_provider', 'azure')
+    
+    # Azure resources have 'id' field
+    if resource.get('id'):
+        return resource['id']
+    
+    # AWS resources use different ID fields depending on resource type
+    if cloud_provider == 'aws':
+        # S3 buckets use 'Name'
+        if resource.get('Name'):
+            bucket_name = resource['Name']
+            # Construct ARN-style ID for S3 buckets
+            return f"arn:aws:s3:::{bucket_name}"
+        
+        # EC2 instances use 'InstanceId'
+        if resource.get('InstanceId'):
+            instance_id = resource['InstanceId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            # Note: Account ID not available, using placeholder
+            return f"arn:aws:ec2:{region}::instance/{instance_id}"
+        
+        # EBS volumes use 'VolumeId'
+        if resource.get('VolumeId'):
+            volume_id = resource['VolumeId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::volume/{volume_id}"
+        
+        # EBS snapshots use 'SnapshotId'
+        if resource.get('SnapshotId'):
+            snapshot_id = resource['SnapshotId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::snapshot/{snapshot_id}"
+        
+        # RDS instances use 'DBInstanceIdentifier'
+        if resource.get('DBInstanceIdentifier'):
+            db_id = resource['DBInstanceIdentifier']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:rds:{region}::db/{db_id}"
+        
+        # Lambda functions use 'FunctionName' or 'FunctionArn'
+        if resource.get('FunctionArn'):
+            return resource['FunctionArn']
+        if resource.get('FunctionName'):
+            func_name = resource['FunctionName']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:lambda:{region}::function/{func_name}"
+        
+        # NAT Gateways use 'NatGatewayId'
+        if resource.get('NatGatewayId'):
+            nat_id = resource['NatGatewayId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::natgateway/{nat_id}"
+        
+        # Generic fallback for AWS - try common ID patterns
+        for id_field in ['Arn', 'ARN', 'ResourceId', 'ResourceARN']:
+            if resource.get(id_field):
+                return resource[id_field]
+    
+    # Final fallback - generate a unique ID from available data
+    resource_name = resource.get('name', '') or resource.get('Name', '') or 'unknown'
+    resource_type = resource.get('type', '') or resource.get('c7n:resource-type', '') or 'resource'
+    return f"{cloud_provider}:{resource_type}/{resource_name}"
+
+
 def convert_resource_to_finding(policy_name: str, resource: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert a Cloud Custodian resource to a LeftSize finding"""
     
@@ -826,10 +909,11 @@ def convert_resource_to_finding(policy_name: str, resource: Dict[str, Any], conf
         # Use policy name directly as rule ID (already has leftsize- prefix)
         rule_id = policy_name
         
-        # Extract resource ID and basic info
-        resource_id = resource.get('id', '')
-        resource_name = resource.get('name', '')
-        resource_type = resource.get('type', '')
+        # Extract resource ID and basic info - handle both Azure and AWS formats
+        # Azure uses 'id', AWS uses various fields depending on resource type
+        resource_id = extract_resource_id(resource, config)
+        resource_name = resource.get('name', '') or resource.get('Name', '')
+        resource_type = resource.get('type', '') or resource.get('c7n:resource-type', '')
         
         # Build scope from resource ID
         scope = build_scope_from_resource_id(resource_id, config)
