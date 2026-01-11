@@ -32,6 +32,8 @@ policies:
       Compliance: CIS AWS Foundations, ISO 27001, SOC2, GDPR
     
     resource: s3
+    metadata:
+      tier: pro
     
     filters:
       # Check for public access configurations
@@ -98,6 +100,8 @@ policies:
       Compliance: CIS AWS Foundations, ISO 27001, SOC2, PCI-DSS
     
     resource: s3
+    metadata:
+      tier: pro
     
     filters:
       # No encryption configuration
@@ -151,6 +155,8 @@ policies:
       Compliance: CIS AWS Foundations, PCI-DSS, NIST
     
     resource: security-group
+    metadata:
+      tier: pro
     
     filters:
       # Has ingress rules
@@ -243,6 +249,8 @@ policies:
       Compliance: CIS AWS Foundations, ISO 27001, PCI-DSS
     
     resource: ebs
+    metadata:
+      tier: pro
     
     filters:
       # Encryption is not enabled
@@ -291,6 +299,8 @@ policies:
       Compliance: CIS AWS Foundations, ISO 27001, PCI-DSS, HIPAA
     
     resource: rds
+    metadata:
+      tier: pro
     
     filters:
       # Storage encryption is not enabled
@@ -340,6 +350,8 @@ policies:
       Compliance: FinOps best practices, cost allocation policies
     
     resource: aws.ec2
+    metadata:
+      tier: pro
     
     filters:
       # Check for missing or empty owner tag
@@ -387,6 +399,8 @@ policies:
       Ensure all RDS database instances have clear ownership metadata.
     
     resource: aws.rds
+    metadata:
+      tier: pro
     
     filters:
       - or:
@@ -420,6 +434,8 @@ policies:
       Ensure all S3 buckets have clear ownership metadata.
     
     resource: aws.s3
+    metadata:
+      tier: pro
     
     filters:
       - or:
@@ -453,6 +469,8 @@ policies:
       Ensure all EBS volumes have clear ownership metadata.
     
     resource: aws.ebs
+    metadata:
+      tier: pro
     
     filters:
       - or:
@@ -486,6 +504,9 @@ policies:
       Ensure all Elastic Load Balancers have clear ownership metadata.
     
     resource: aws.elb
+    metadata:
+      tier: pro
+
     
     filters:
       - or:

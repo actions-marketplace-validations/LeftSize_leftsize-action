@@ -41,6 +41,18 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+class RepositoryLimitExceeded(Exception):
+    """Raised when the free tier repository limit is exceeded"""
+    def __init__(self, message: str, context: Dict[str, Any]):
+        super().__init__(message)
+        self.message = message
+        self.context = context
+        self.current_count = context.get('currentCount', 0)
+        self.limit = context.get('limit', 3)
+        self.upgrade_url = context.get('upgradeUrl', 'https://github.com/marketplace/leftsize')
+        self.account_login = context.get('accountLogin', '')
+
+
 # Input validation functions
 def validate_installation_id(installation_id: str) -> bool:
     """Validate GitHub installation ID format (numeric)"""
@@ -265,11 +277,27 @@ def github_action_main():
         
         # Submit findings to backend
         submitted = False
+        plan_info = None
+        limit_exceeded_error = None
+        
         if findings and backend_url and installation_id and repository_token:
             try:
-                submit_findings(findings, config_data)
-                submitted = True
-                logger.info("Findings submitted successfully to backend")
+                result = submit_findings(findings, config_data)
+                submitted = result.get('submitted', False)
+                plan_info = result.get('plan_info')
+                if submitted:
+                    logger.info("Findings submitted successfully to backend")
+            except RepositoryLimitExceeded as e:
+                logger.warning(f"Repository limit exceeded: {e.message}")
+                limit_exceeded_error = e
+                # Don't fail the workflow, but mark as not submitted
+                set_github_output('findings-count', str(findings_count))
+                set_github_output('findings-submitted', 'false')
+                set_github_output('findings-json', json.dumps(findings, default=str))
+                set_github_output('limit-exceeded', 'true')
+                print_github_summary(findings, submitted=False, limit_exceeded=limit_exceeded_error)
+                # Return 0 - we don't want to fail the workflow, just show the warning
+                return 0
             except Exception as e:
                 logger.error(f"Failed to submit findings to backend: {e}")
                 set_github_output('findings-count', str(findings_count))
@@ -284,7 +312,7 @@ def github_action_main():
         set_github_output('findings-json', json.dumps(findings, default=str))
         
         # GitHub Actions summary
-        print_github_summary(findings, submitted)
+        print_github_summary(findings, submitted, plan_info=plan_info)
         
         logger.info("LeftSize GitHub Action completed successfully")
         return 0
@@ -308,8 +336,20 @@ def set_github_output(name: str, value: str):
         print(f"::set-output name={name}::{value}")
 
 
-def print_github_summary(findings: List[Dict[str, Any]], submitted: bool):
-    """Print GitHub Actions job summary"""
+def print_github_summary(
+    findings: List[Dict[str, Any]], 
+    submitted: bool,
+    plan_info: Optional[Dict[str, Any]] = None,
+    limit_exceeded: Optional[RepositoryLimitExceeded] = None
+):
+    """Print GitHub Actions job summary
+    
+    Args:
+        findings: List of findings from the scan
+        submitted: Whether findings were submitted to backend
+        plan_info: Optional plan information from the backend response
+        limit_exceeded: Optional exception if repository limit was exceeded
+    """
     github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     
     summary = f"""# LeftSize Cloud Cost Optimization Scan Results
@@ -317,6 +357,55 @@ def print_github_summary(findings: List[Dict[str, Any]], submitted: bool):
 ## Summary
 - **Findings**: {len(findings)}
 - **Submitted to Backend**: {'✅ Yes' if submitted else '❌ No'}
+
+"""
+    
+    # Show repository limit exceeded warning
+    if limit_exceeded:
+        summary += f"""## ⚠️ Free Tier Limit Reached
+
+Your free plan allows scanning **{limit_exceeded.limit} repositories**. You've already scanned {limit_exceeded.current_count} repositories.
+
+**Findings from this scan were not submitted** because the repository limit has been exceeded.
+
+### Upgrade to Pro
+Upgrade to LeftSize Pro for unlimited repository scanning and access to all optimization rules.
+
+👉 **[Upgrade Now]({limit_exceeded.upgrade_url})**
+
+---
+
+"""
+    
+    # Show plan info if available
+    if plan_info:
+        plan_type = plan_info.get('PlanType', 'Free')
+        repo_count = plan_info.get('ScannedRepositoryCount', 0)
+        repo_limit = plan_info.get('RepositoryLimit', 3)
+        
+        if plan_type == 'Free':
+            remaining = max(0, repo_limit - repo_count)
+            summary += f"""## Plan Information
+- **Plan**: Free Tier
+- **Repositories Scanned**: {repo_count} / {repo_limit}
+- **Remaining**: {remaining} repositories
+
+"""
+            if remaining <= 1:
+                summary += f"""### 💡 Running low on free scans?
+Upgrade to LeftSize Pro for unlimited repository scanning and access to all optimization rules.
+
+👉 **[Upgrade to Pro](https://github.com/marketplace/leftsize)**
+
+---
+
+"""
+        else:
+            summary += f"""## Plan Information
+- **Plan**: Pro ✨
+- **Repositories Scanned**: {repo_count} (unlimited)
+
+---
 
 """
     
@@ -1033,8 +1122,15 @@ def extract_resource_metadata(resource: Dict[str, Any], resource_id: str) -> Dic
 
 
 
-def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> None:
-    """Submit findings to LeftSize backend"""
+def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Submit findings to LeftSize backend
+    
+    Returns:
+        Dict with submission result info including plan details if available
+        
+    Raises:
+        RepositoryLimitExceeded: If the free tier repository limit is exceeded
+    """
     
     output_config = config.get('output', {})
     backend_url = output_config.get('backend_url')
@@ -1042,17 +1138,19 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
     # Support both 'token' (from config file) and 'repository_token' (from command line)
     repository_token = output_config.get('repository_token') or output_config.get('token')
     
+    result = {'submitted': False, 'plan_info': None}
+    
     # Save local output if configured
     if output_config.get('local_output', {}).get('enabled', False):
         save_local_output(findings, output_config)
     
     if not backend_url or not installation_id:
         logger.warning("Backend URL or installation ID not configured, skipping submission")
-        return
+        return result
     
     if not repository_token:
         logger.warning("Repository token not configured, skipping submission")
-        return
+        return result
     
     try:
         # Get currency from config
@@ -1077,12 +1175,39 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
                    currency=currency)
         
         response = requests.post(url, json=finding_groups, headers=headers, timeout=30)
+        
+        # Handle 402 Payment Required (repository limit exceeded)
+        if response.status_code == 402:
+            try:
+                error_data = response.json()
+                error_code = error_data.get('Code', '')
+                if error_code == 'REPOSITORY_LIMIT_EXCEEDED':
+                    context = error_data.get('Context', {})
+                    raise RepositoryLimitExceeded(
+                        error_data.get('Message', 'Repository limit exceeded'),
+                        context
+                    )
+            except (ValueError, KeyError):
+                pass
+            # If we can't parse the error, raise generic
+            response.raise_for_status()
+        
         response.raise_for_status()
         
+        response_data = response.json()
         logger.info("Findings submitted successfully", 
                    response_status=response.status_code,
-                   response_data=response.json())
+                   response_data=response_data)
         
+        result['submitted'] = True
+        # Extract plan info from response if available
+        if 'PlanInfo' in response_data:
+            result['plan_info'] = response_data['PlanInfo']
+        
+        return result
+        
+    except RepositoryLimitExceeded:
+        raise  # Re-raise to allow caller to handle specifically
     except Exception as e:
         logger.error("Failed to submit findings to backend", error=str(e))
         raise  # Re-raise to allow caller to handle

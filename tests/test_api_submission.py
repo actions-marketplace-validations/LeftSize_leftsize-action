@@ -16,7 +16,7 @@ from pathlib import Path
 # Add parent directory to path to import run module
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from run import submit_findings, group_findings
+from run import submit_findings, group_findings, RepositoryLimitExceeded
 
 
 class TestSubmitFindings:
@@ -48,7 +48,7 @@ class TestSubmitFindings:
             }
         }
         
-        submit_findings(findings, config)
+        result = submit_findings(findings, config)
         
         # Verify the call was made
         mock_post.assert_called_once()
@@ -65,6 +65,9 @@ class TestSubmitFindings:
         headers = call_args.kwargs.get('headers', {})
         assert "Authorization" in headers
         assert headers["Authorization"] == "Bearer 12345678-1234-1234-1234-123456789012"
+        
+        # Verify return value
+        assert result['submitted'] is True
     
     @patch('run.requests.post')
     @patch('run.logger')
@@ -115,10 +118,11 @@ class TestSubmitFindings:
             }
         }
         
-        submit_findings(findings, config)
+        result = submit_findings(findings, config)
         
         mock_post.assert_not_called()
         mock_logger.warning.assert_called()
+        assert result['submitted'] is False
     
     @patch('run.requests.post')
     @patch('run.logger')
@@ -132,10 +136,11 @@ class TestSubmitFindings:
             }
         }
         
-        submit_findings(findings, config)
+        result = submit_findings(findings, config)
         
         mock_post.assert_not_called()
         mock_logger.warning.assert_called()
+        assert result['submitted'] is False
     
     @patch('run.requests.post')
     @patch('run.logger')
@@ -186,6 +191,75 @@ class TestSubmitFindings:
         mock_post.assert_called_once()
         call_args = mock_post.call_args
         assert call_args.kwargs.get('timeout') == 30
+    
+    @patch('run.requests.post')
+    @patch('run.logger')
+    def test_handles_repository_limit_exceeded(self, mock_logger, mock_post):
+        """Should raise RepositoryLimitExceeded on 402 response"""
+        mock_response = Mock()
+        mock_response.status_code = 402
+        mock_response.json.return_value = {
+            "Code": "REPOSITORY_LIMIT_EXCEEDED",
+            "Message": "Free tier repository limit reached",
+            "Details": "Your free plan allows scanning 3 repositories",
+            "Context": {
+                "accountLogin": "test-org",
+                "currentCount": 3,
+                "limit": 3,
+                "upgradeUrl": "https://github.com/marketplace/leftsize"
+            }
+        }
+        mock_post.return_value = mock_response
+        
+        findings = [{"ruleId": "test", "scope": "test", "resourceId": "/test", "metadata": {}}]
+        config = {
+            "output": {
+                "backend_url": "https://api.leftsize.com",
+                "installation_id": "12345",
+                "repository_token": "12345678-1234-1234-1234-123456789012"
+            }
+        }
+        
+        with pytest.raises(RepositoryLimitExceeded) as exc_info:
+            submit_findings(findings, config)
+        
+        assert exc_info.value.current_count == 3
+        assert exc_info.value.limit == 3
+        assert exc_info.value.upgrade_url == "https://github.com/marketplace/leftsize"
+        assert exc_info.value.account_login == "test-org"
+    
+    @patch('run.requests.post')
+    @patch('run.logger')
+    def test_returns_plan_info_from_response(self, mock_logger, mock_post):
+        """Should return plan info from successful response"""
+        mock_response = Mock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {
+            "message": "accepted",
+            "PlanInfo": {
+                "PlanType": "Free",
+                "ScannedRepositoryCount": 2,
+                "RepositoryLimit": 3
+            }
+        }
+        mock_response.raise_for_status = Mock()
+        mock_post.return_value = mock_response
+        
+        findings = [{"ruleId": "test", "scope": "test", "resourceId": "/test", "metadata": {}}]
+        config = {
+            "output": {
+                "backend_url": "https://api.leftsize.com",
+                "installation_id": "12345",
+                "repository_token": "12345678-1234-1234-1234-123456789012"
+            }
+        }
+        
+        result = submit_findings(findings, config)
+        
+        assert result['submitted'] is True
+        assert result['plan_info'] is not None
+        assert result['plan_info']['PlanType'] == 'Free'
+        assert result['plan_info']['ScannedRepositoryCount'] == 2
 
 
 class TestGroupFindings:

@@ -5,6 +5,8 @@ policies:
   - name: leftsize-idle-ecs-container-instances
     description: "Find ECS clusters with idle container instances due to high ASG minimum capacity"
     resource: aws.asg
+    metadata:
+      tier: pro
     filters:
       # ASG must be associated with an ECS cluster (has specific tag)
       - type: value
@@ -44,6 +46,8 @@ policies:
   - name: leftsize-fargate-spot-eligible
     description: "Find ECS services using regular Fargate that could use Fargate Spot for 70% savings"
     resource: aws.ecs-service
+    metadata:
+      tier: pro
     filters:
       # Only active services
       - type: value
@@ -102,6 +106,8 @@ policies:
   - name: leftsize-inactive-ec2-instance
     description: "Find inactive EC2 instances with low CPU and network utilization"
     resource: aws.ec2
+    metadata:
+      tier: pro
     filters:
       # Only check running instances
       - type: value
@@ -140,6 +146,8 @@ policies:
   - name: leftsize-underutilized-ec2-instance
     description: "Find underutilized EC2 instances with low but non-zero CPU usage (right-sizing candidates)"
     resource: aws.ec2
+    metadata:
+      tier: pro
     filters:
       # Only running instances
       - type: value
@@ -189,6 +197,8 @@ policies:
   - name: leftsize-multi-az-nonprod-ec2
     description: "Find non-production EC2 instances spread across multiple AZs (unnecessary HA)"
     resource: aws.ec2
+    metadata:
+      tier: pro
     filters:
       # Only running instances
       - type: value
@@ -224,6 +234,8 @@ policies:
   - name: leftsize-unattached-ebs-volume
     description: "Find unattached EBS volumes that can be deleted"
     resource: aws.ebs
+    metadata:
+      tier: free
     filters:
       # Volume is not attached to any instance
       - type: value
@@ -252,6 +264,8 @@ policies:
   - name: leftsize-unused-elastic-ip
     description: "Find unused Elastic IP addresses that can be released"
     resource: aws.network-addr
+    metadata:
+      tier: free
     filters:
       # Not associated with any instance or network interface
       - type: value
@@ -269,6 +283,8 @@ policies:
   - name: leftsize-idle-rds-instance
     description: "Find RDS instances with low connection and CPU utilization"
     resource: aws.rds
+    metadata:
+      tier: pro
     filters:
       # Only check available (running) instances
       - type: value
@@ -302,6 +318,8 @@ policies:
   - name: leftsize-unused-load-balancer
     description: "Find load balancers with no active targets"
     resource: aws.elb
+    metadata:
+      tier: free
     filters:
       # No healthy targets
       - type: value
@@ -322,6 +340,8 @@ policies:
   - name: leftsize-unused-alb
     description: "Find Application Load Balancers with no active target groups"
     resource: aws.app-elb
+    metadata:
+      tier: free
     filters:
       # Load balancer is older than 3 days
       - type: value
@@ -350,6 +370,8 @@ policies:
   - name: leftsize-orphaned-ebs-snapshots
     description: "Find old EBS snapshots (>30 days) where source volume no longer exists"
     resource: aws.ebs-snapshot
+    metadata:
+      tier: free
     filters:
       # Snapshot is older than 30 days
       - type: age
@@ -376,6 +398,8 @@ policies:
   - name: leftsize-ec2-outdated-generation
     description: "Find EC2 instances on older generations (4th gen or earlier) - 10-40% savings available"
     resource: aws.ec2
+    metadata:
+      tier: pro
     filters:
       # Only running instances
       - type: value
@@ -399,6 +423,8 @@ policies:
   - name: leftsize-ec2-scheduled-shutdown-missing
     description: "Find non-production EC2 instances running 24/7 without scheduled shutdown (30-70% savings)"
     resource: aws.ec2
+    metadata:
+      tier: pro
     filters:
       # Only running instances
       - type: value
@@ -443,6 +469,8 @@ policies:
   - name: leftsize-s3-intelligent-tiering-missing
     description: "Find S3 buckets not using Intelligent-Tiering (40-70% savings on infrequent data)"
     resource: aws.s3
+    metadata:
+      tier: pro
     filters:
       # Bucket exists
       - type: value
@@ -461,6 +489,8 @@ policies:
   - name: leftsize-gp2-to-gp3-migration
     description: "Find EBS volumes still using gp2 - migrate to gp3 for 20% savings and better performance"
     resource: aws.ebs
+    metadata:
+      tier: free
     filters:
       # Volume is gp2 type
       - type: value
@@ -489,6 +519,8 @@ policies:
   - name: leftsize-rds-outdated-version
     description: "Find RDS instances on MySQL 5.7/PostgreSQL 11 triggering Extended Support charges"
     resource: aws.rds
+    metadata:
+      tier: pro
     filters:
       # Only available (running) instances
       - type: value
@@ -521,6 +553,8 @@ policies:
   - name: leftsize-rds-multiaz-nonprod
     description: "Find non-production RDS instances with unnecessary Multi-AZ (2x cost)"
     resource: aws.rds
+    metadata:
+      tier: pro
     filters:
       # Only available (running) instances
       - type: value
@@ -558,6 +592,8 @@ policies:
   - name: leftsize-rds-non-graviton
     description: "Find RDS instances using x86 instead of Graviton (20-40% savings)"
     resource: aws.rds
+    metadata:
+      tier: pro
     filters:
       # Only available (running) instances
       - type: value
@@ -588,6 +624,8 @@ policies:
   - name: leftsize-lambda-x86-architecture
     description: "Find Lambda functions using x86 instead of ARM (20% savings)"
     resource: aws.lambda
+    metadata:
+      tier: pro
     filters:
       # Default architecture is x86_64 (ARM is arm64)
       - or:
@@ -622,6 +660,8 @@ policies:
   - name: leftsize-inactive-nat-gateway
     description: "Find NAT Gateways with no traffic (pure waste)"
     resource: aws.nat-gateway
+    metadata:
+      tier: pro
     filters:
       # Only active gateways
       - type: value
@@ -652,6 +692,8 @@ policies:
   - name: leftsize-ebs-delete-on-termination-disabled
     description: "Find EBS volumes with DeleteOnTermination disabled that will orphan"
     resource: aws.ec2
+    metadata:
+      tier: pro
     filters:
       # Only running instances
       - type: value
