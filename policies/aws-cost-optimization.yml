@@ -342,3 +342,142 @@ policies:
         op: delete
         days: 14
         tag: leftsize-unused-alb-delete
+
+  # ========================================
+  # 💰 COST OPTIMIZATION - Advanced Rules
+  # ========================================
+
+  - name: leftsize-orphaned-ebs-snapshots
+    description: "Find old EBS snapshots (>30 days) where source volume no longer exists"
+    resource: aws.ebs-snapshot
+    filters:
+      # Snapshot is older than 30 days
+      - type: age
+        days: 30
+        op: gte
+      # Owned by current account (not shared/public AMI snapshots)
+      - type: value
+        key: 'OwnerId'
+        value: present
+      # Source volume no longer exists (orphaned)
+      - or:
+        - type: value
+          key: 'VolumeId'
+          value: absent
+        - type: value
+          key: 'VolumeId'
+          value: ''
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-orphaned-snapshot-delete
+
+  - name: leftsize-ec2-outdated-generation
+    description: "Find EC2 instances on older generations (4th gen or earlier) - 10-40% savings available"
+    resource: aws.ec2
+    filters:
+      # Only running instances
+      - type: value
+        key: 'State.Name'
+        value: 'running'
+      # Older instance generations (m4, c4, r4, i2, d2, h1, etc.)
+      - type: value
+        key: 'InstanceType'
+        op: regex
+        value: '^(m[1-4]|c[1-4]|r[1-4]|i[1-2]|d2|h1|g3|p2|x1)\.'
+      # Instance has been running for at least 7 days
+      - type: instance-age
+        op: gte
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-outdated-generation-review
+
+  - name: leftsize-ec2-scheduled-shutdown-missing
+    description: "Find non-production EC2 instances running 24/7 without scheduled shutdown (30-70% savings)"
+    resource: aws.ec2
+    filters:
+      # Only running instances
+      - type: value
+        key: 'State.Name'
+        value: 'running'
+      # Non-production environments based on tags
+      - or:
+        - type: value
+          key: 'tag:Environment'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tag:Env'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tag:environment'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+      # Not already tagged for scheduling
+      - not:
+        - or:
+          - type: value
+            key: 'tag:Schedule'
+            value: present
+          - type: value
+            key: 'tag:AutoStop'
+            value: present
+          - type: value
+            key: 'tag:StopSchedule'
+            value: present
+      # Instance has been running for at least 7 days
+      - type: instance-age
+        op: gte
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-schedule-review
+
+  - name: leftsize-s3-intelligent-tiering-missing
+    description: "Find S3 buckets not using Intelligent-Tiering (40-70% savings on infrequent data)"
+    resource: aws.s3
+    filters:
+      # Bucket exists
+      - type: value
+        key: 'Name'
+        value: present
+      # No intelligent-tiering configuration on this bucket
+      - type: intelligent-tiering
+        count: 0
+        count_op: eq
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-intelligent-tiering-review
+
+  - name: leftsize-gp2-to-gp3-migration
+    description: "Find EBS volumes still using gp2 - migrate to gp3 for 20% savings and better performance"
+    resource: aws.ebs
+    filters:
+      # Volume is gp2 type
+      - type: value
+        key: 'VolumeType'
+        value: 'gp2'
+      # Volume is in-use (attached to an instance)
+      - type: value
+        key: 'State'
+        value: 'in-use'
+      # Volume is older than 7 days
+      - type: value
+        key: 'CreateTime'
+        op: less-than
+        value_type: age
+        value: 7
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-gp3-migration-review

@@ -198,3 +198,127 @@ policies:
         op: delete
         days: 14
         tag: leftsize-inactive-lb-delete
+
+  # ========================================
+  # 💰 COST OPTIMIZATION - POINTFIVE INSPIRED
+  # ========================================
+  
+  # Azure Hybrid Benefit - Up to 40% savings on Windows VMs
+  - name: leftsize-hybrid-benefit-missing
+    description: "Find Windows VMs not using Azure Hybrid Benefit (up to 40% savings)"
+    resource: azure.vm
+    filters:
+      # Only Windows VMs
+      - type: value
+        key: 'properties.storageProfile.osDisk.osType'
+        value: 'Windows'
+      # Running VMs only
+      - type: value
+        key: 'properties.extended.instanceView.powerState.displayStatus'
+        value: 'VM running'
+      # No Hybrid Benefit configured
+      - or:
+        - type: value
+          key: 'properties.licenseType'
+          value: null
+        - type: value
+          key: 'properties.licenseType'
+          op: 'not-in'
+          value: ['Windows_Server', 'Windows_Client']
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-hybrid-benefit-review
+
+  # VM Outdated Series - 10-20% savings + better performance
+  - name: leftsize-vm-outdated-series
+    description: "Find VMs using outdated series (v2/v3/v4) when v5/v6 available"
+    resource: azure.vm
+    filters:
+      # Running VMs only
+      - type: value
+        key: 'properties.extended.instanceView.powerState.displayStatus'
+        value: 'VM running'
+      # Match older VM series (v2, v3, v4)
+      - type: value
+        key: 'properties.hardwareProfile.vmSize'
+        op: 'regex'
+        value: 'Standard_(D|E|F|L|M)[0-9]+[a-z]*s?_v[234]$'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-vm-series-upgrade
+
+  # VM Scheduled Shutdown - 30-70% savings for non-prod
+  - name: leftsize-vm-scheduled-shutdown-missing
+    description: "Find non-production VMs without auto-shutdown configured"
+    resource: azure.vm
+    filters:
+      # Running VMs only
+      - type: value
+        key: 'properties.extended.instanceView.powerState.displayStatus'
+        value: 'VM running'
+      # Non-production environments (by tag)
+      - or:
+        - type: value
+          key: 'tags.environment'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tags.Environment'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tags.env'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-auto-shutdown-review
+
+  # Orphaned Snapshots - 100% waste elimination
+  - name: leftsize-orphaned-snapshots
+    description: "Find old disk snapshots (>30 days) accumulating storage costs"
+    resource: azure.snapshot
+    filters:
+      # Snapshots older than 30 days
+      - type: value
+        key: 'properties.timeCreated'
+        op: 'le'
+        value_type: age
+        value: 30
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 30
+        tag: leftsize-snapshot-cleanup
+
+  # Storage Suboptimal Tier - 50%+ storage savings
+  - name: leftsize-storage-suboptimal-tier
+    description: "Find storage accounts using Hot tier for infrequently accessed data"
+    resource: azure.storage
+    filters:
+      # Hot tier accounts
+      - type: value
+        key: 'properties.accessTier'
+        value: 'Hot'
+      # Account older than 90 days (established usage patterns)
+      - type: value
+        key: 'properties.creationTime'
+        op: 'le'
+        value_type: age
+        value: 90
+      # Only GPv2 accounts (support tiering)
+      - type: value
+        key: 'kind'
+        op: 'in'
+        value: ['StorageV2', 'BlobStorage']
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-storage-tier-review
