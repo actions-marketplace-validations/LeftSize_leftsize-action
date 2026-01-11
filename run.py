@@ -748,18 +748,23 @@ def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> st
     """Build LeftSize scope from resource ID - handles Azure and AWS formats"""
     cloud_provider = config.get('cloud_provider', 'azure')
     
+    # Helper to get AWS region from config or environment
+    def get_aws_region_from_config() -> str:
+        regions = config.get('targets', {}).get('aws', {}).get('regions', [])
+        if regions:
+            return regions[0]
+        return os.getenv('AWS_REGION', 'us-east-1')
+    
     try:
         if cloud_provider == 'aws':
             # AWS ARN format: arn:aws:service:region:account:resource
+            # Note: Some services like S3 have global ARNs without region (arn:aws:s3:::bucket)
             if resource_id.startswith('arn:aws:'):
                 parts = resource_id.split(':')
-                if len(parts) >= 4:
-                    region = parts[3] or os.getenv('AWS_REGION', 'us-east-1')
-                    return f"aws:region/{region}"
-            # Fallback for non-ARN AWS resources
-            regions = config.get('targets', {}).get('aws', {}).get('regions', [])
-            region = regions[0] if regions else os.getenv('AWS_REGION', 'us-east-1')
-            return f"aws:region/{region}"
+                if len(parts) >= 4 and parts[3]:  # Only use if region is non-empty
+                    return f"aws:region/{parts[3]}"
+            # Fallback: use configured region (for S3 and other region-less ARNs)
+            return f"aws:region/{get_aws_region_from_config()}"
         
         # Azure resource ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
         parts = resource_id.split('/')
@@ -774,7 +779,9 @@ def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> st
     except Exception:
         # Final fallback - ensure we never return None
         if cloud_provider == 'aws':
-            return f"aws:region/{os.getenv('AWS_REGION', 'us-east-1')}"
+            regions = config.get('targets', {}).get('aws', {}).get('regions', [])
+            region = regions[0] if regions else os.getenv('AWS_REGION', 'us-east-1')
+            return f"aws:region/{region}"
         subscription_id = get_subscription_id(config) or 'unknown'
         return f"azure:subscription/{subscription_id}"
 
