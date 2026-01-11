@@ -322,3 +322,82 @@ policies:
         op: tag
         days: 14
         tag: leftsize-storage-tier-review
+
+  # VM ARM Architecture - 30-50% savings with ARM-based VMs
+  - name: leftsize-vm-arm-architecture
+    description: "Find VMs not using ARM-based sizes (Dpsv5/Epsv5) for cost savings"
+    resource: azure.vm
+    filters:
+      # Running VMs only
+      - type: value
+        key: 'properties.extended.instanceView.powerState.displayStatus'
+        value: 'VM running'
+      # Target x86 D/E-series VMs (v3/v4/v5) that could use ARM alternatives
+      # These are VMs like Standard_D4s_v5, Standard_E8s_v4, etc.
+      - type: value
+        key: 'properties.hardwareProfile.vmSize'
+        op: 'regex'
+        value: 'Standard_(D|E)[0-9]+[a-z]*s?_v[345]$'
+      # Exclude VMs already using ARM-based sizes (Dps/Eps series)
+      - not:
+        - type: value
+          key: 'properties.hardwareProfile.vmSize'
+          op: 'regex'
+          value: 'Standard_(D|E)p[ld]*s_v5'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-arm-architecture-review
+
+  # SQL Business Critical Tier in Non-Prod - 60%+ savings
+  - name: leftsize-sql-business-critical-nonprod
+    description: "Find non-production SQL databases using expensive Business Critical tier"
+    resource: azure.sql-database
+    filters:
+      # Business Critical tier
+      - type: value
+        key: 'sku.tier'
+        value: 'BusinessCritical'
+      # Non-production environments (by tag)
+      - or:
+        - type: value
+          key: 'tags.environment'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tags.Environment'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tags.env'
+          op: 'in'
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+      # Database older than 7 days (not a new deployment)
+      - type: value
+        key: 'properties.creationDate'
+        op: 'le'
+        value_type: age
+        value: 7
+
+  # Stopped VMs with Storage Costs - Often overlooked costs
+  - name: leftsize-stopped-vm-storage-costs
+    description: "Find stopped/deallocated VMs still incurring storage costs for premium disks"
+    resource: azure.vm
+    filters:
+      # VM is deallocated (not running, not charged for compute)
+      - type: value
+        key: 'properties.extended.instanceView.powerState.displayStatus'
+        op: 'in'
+        value: ['VM deallocated', 'VM stopped']
+      # VM has been stopped for more than 30 days
+      - type: value
+        key: 'properties.extended.instanceView.powerState.time'
+        op: 'le'
+        value_type: age
+        value: 30
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-stopped-vm-review

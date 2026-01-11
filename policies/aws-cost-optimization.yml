@@ -481,3 +481,193 @@ policies:
         op: tag
         days: 7
         tag: leftsize-gp3-migration-review
+
+  # ========================================
+  # 💰 COST OPTIMIZATION - Batch 2
+  # ========================================
+
+  - name: leftsize-rds-outdated-version
+    description: "Find RDS instances on MySQL 5.7/PostgreSQL 11 triggering Extended Support charges"
+    resource: aws.rds
+    filters:
+      # Only available (running) instances
+      - type: value
+        key: 'DBInstanceStatus'
+        value: 'available'
+      # MySQL 5.7 or PostgreSQL 11 (Extended Support versions)
+      - or:
+        - and:
+          - type: value
+            key: 'Engine'
+            value: 'mysql'
+          - type: value
+            key: 'EngineVersion'
+            op: regex
+            value: '^5\.7\.'
+        - and:
+          - type: value
+            key: 'Engine'
+            value: 'postgres'
+          - type: value
+            key: 'EngineVersion'
+            op: regex
+            value: '^11\.'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-rds-version-upgrade
+
+  - name: leftsize-rds-multiaz-nonprod
+    description: "Find non-production RDS instances with unnecessary Multi-AZ (2x cost)"
+    resource: aws.rds
+    filters:
+      # Only available (running) instances
+      - type: value
+        key: 'DBInstanceStatus'
+        value: 'available'
+      # Multi-AZ enabled
+      - type: value
+        key: 'MultiAZ'
+        value: true
+      # Non-production environments based on tags
+      - or:
+        - type: value
+          key: 'tag:Environment'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tag:Env'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        - type: value
+          key: 'tag:environment'
+          op: in
+          value: ['dev', 'development', 'test', 'testing', 'staging', 'qa', 'sandbox']
+        # Or DB instance identifier contains non-prod keywords
+        - type: value
+          key: 'DBInstanceIdentifier'
+          op: regex
+          value: '(dev|test|staging|qa|sandbox)'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-multiaz-review
+
+  - name: leftsize-rds-non-graviton
+    description: "Find RDS instances using x86 instead of Graviton (20-40% savings)"
+    resource: aws.rds
+    filters:
+      # Only available (running) instances
+      - type: value
+        key: 'DBInstanceStatus'
+        value: 'available'
+      # Graviton-compatible engines (MySQL, PostgreSQL, MariaDB)
+      - type: value
+        key: 'Engine'
+        op: in
+        value: ['mysql', 'postgres', 'mariadb']
+      # x86 instance classes (not Graviton - db.*.g)
+      - not:
+        - type: value
+          key: 'DBInstanceClass'
+          op: regex
+          value: 'db\.[a-z]+[0-9]+g\.'
+      # Current generation instances only (m5, m6i, r5, r6i, t3)
+      - type: value
+        key: 'DBInstanceClass'
+        op: regex
+        value: 'db\.(m[56]i?|r[56]i?|t3)\.'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-graviton-review
+
+  - name: leftsize-lambda-x86-architecture
+    description: "Find Lambda functions using x86 instead of ARM (20% savings)"
+    resource: aws.lambda
+    filters:
+      # Default architecture is x86_64 (ARM is arm64)
+      - or:
+        - type: value
+          key: 'Architectures'
+          value: absent
+        - type: value
+          key: 'Architectures[0]'
+          value: 'x86_64'
+      # Exclude functions with custom runtimes (may need x86)
+      - not:
+        - type: value
+          key: 'Runtime'
+          op: in
+          value: ['provided', 'provided.al2', 'provided.al2023']
+      # Function has been invoked recently (active)
+      - type: metrics
+        name: Invocations
+        namespace: AWS/Lambda
+        dimensions:
+          FunctionName: Name
+        op: greater-than
+        value: 0
+        statistics: Sum
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-lambda-arm-review
+
+  - name: leftsize-inactive-nat-gateway
+    description: "Find NAT Gateways with no traffic (pure waste)"
+    resource: aws.nat-gateway
+    filters:
+      # Only active gateways
+      - type: value
+        key: 'State'
+        value: 'available'
+      # No outbound traffic in 7 days
+      - type: metrics
+        name: BytesOutToDestination
+        namespace: AWS/NATGateway
+        dimensions:
+          NatGatewayId: NatGatewayId
+        op: equal
+        value: 0
+        statistics: Sum
+        days: 7
+      # Gateway is older than 7 days
+      - type: value
+        key: 'CreateTime'
+        op: less-than
+        value_type: age
+        value: 7
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-inactive-nat-delete
+
+  - name: leftsize-ebs-delete-on-termination-disabled
+    description: "Find EBS volumes with DeleteOnTermination disabled that will orphan"
+    resource: aws.ec2
+    filters:
+      # Only running instances
+      - type: value
+        key: 'State.Name'
+        value: 'running'
+      # Has EBS volumes with DeleteOnTermination=false
+      - type: value
+        key: 'BlockDeviceMappings[].Ebs.DeleteOnTermination'
+        op: contains
+        value: false
+      # Instance has been running for at least 7 days
+      - type: instance-age
+        op: gte
+        days: 7
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-delete-on-termination-review
