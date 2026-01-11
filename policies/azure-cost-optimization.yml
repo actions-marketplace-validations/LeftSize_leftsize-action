@@ -200,7 +200,7 @@ policies:
         tag: leftsize-inactive-lb-delete
 
   # ========================================
-  # 💰 COST OPTIMIZATION - POINTFIVE INSPIRED
+  # 💰 COST OPTIMIZATION - Advanced Rules
   # ========================================
   
   # Azure Hybrid Benefit - Up to 40% savings on Windows VMs
