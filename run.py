@@ -41,6 +41,18 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+class RepositoryLimitExceeded(Exception):
+    """Raised when the free tier repository limit is exceeded"""
+    def __init__(self, message: str, context: Dict[str, Any]):
+        super().__init__(message)
+        self.message = message
+        self.context = context
+        self.current_count = context.get('currentCount', 0)
+        self.limit = context.get('limit', 3)
+        self.upgrade_url = context.get('upgradeUrl', 'https://github.com/marketplace/leftsize')
+        self.account_login = context.get('accountLogin', '')
+
+
 # Input validation functions
 def validate_installation_id(installation_id: str) -> bool:
     """Validate GitHub installation ID format (numeric)"""
@@ -131,6 +143,7 @@ def github_action_main():
     cloud_provider = os.getenv('LEFTSIZE_CLOUD_PROVIDER', 'azure')
     azure_subscription_ids = os.getenv('LEFTSIZE_AZURE_SUBSCRIPTION_IDS', '')
     aws_regions = os.getenv('LEFTSIZE_AWS_REGIONS', '')
+    currency = os.getenv('LEFTSIZE_CURRENCY', '')
     include_policies = os.getenv('LEFTSIZE_INCLUDE_POLICIES', '')
     exclude_policies = os.getenv('LEFTSIZE_EXCLUDE_POLICIES', '')
     
@@ -231,9 +244,22 @@ def github_action_main():
                 set_github_output('findings-submitted', 'false')
                 logger.error("Azure authentication failed. Please configure Azure credentials.")
                 return 1
+            
+            # Detect or use provided currency
+            if currency:
+                detected_currency = currency.upper()
+                logger.info("Using provided currency", currency=detected_currency)
+            else:
+                # Try to detect from Azure subscription
+                subs = azure_config.get('subscriptions', [])
+                sub_id = subs[0] if subs else None
+                detected_currency = detect_azure_currency(sub_id)
+            config_data['currency'] = detected_currency
+            
         elif cloud_provider == 'aws':
             # AWS auth validation handled by boto3/AWS CLI
-            pass
+            # AWS defaults to USD
+            config_data['currency'] = currency.upper() if currency else 'USD'
         
         # Execute Cloud Custodian policies
         findings = execute_custodian_policies(policies_dir, config_data)
@@ -251,11 +277,27 @@ def github_action_main():
         
         # Submit findings to backend
         submitted = False
+        plan_info = None
+        limit_exceeded_error = None
+        
         if findings and backend_url and installation_id and repository_token:
             try:
-                submit_findings(findings, config_data)
-                submitted = True
-                logger.info("Findings submitted successfully to backend")
+                result = submit_findings(findings, config_data)
+                submitted = result.get('submitted', False)
+                plan_info = result.get('plan_info')
+                if submitted:
+                    logger.info("Findings submitted successfully to backend")
+            except RepositoryLimitExceeded as e:
+                logger.warning(f"Repository limit exceeded: {e.message}")
+                limit_exceeded_error = e
+                # Don't fail the workflow, but mark as not submitted
+                set_github_output('findings-count', str(findings_count))
+                set_github_output('findings-submitted', 'false')
+                set_github_output('findings-json', json.dumps(findings, default=str))
+                set_github_output('limit-exceeded', 'true')
+                print_github_summary(findings, submitted=False, limit_exceeded=limit_exceeded_error)
+                # Return 0 - we don't want to fail the workflow, just show the warning
+                return 0
             except Exception as e:
                 logger.error(f"Failed to submit findings to backend: {e}")
                 set_github_output('findings-count', str(findings_count))
@@ -270,7 +312,7 @@ def github_action_main():
         set_github_output('findings-json', json.dumps(findings, default=str))
         
         # GitHub Actions summary
-        print_github_summary(findings, submitted)
+        print_github_summary(findings, submitted, plan_info=plan_info)
         
         logger.info("LeftSize GitHub Action completed successfully")
         return 0
@@ -294,8 +336,20 @@ def set_github_output(name: str, value: str):
         print(f"::set-output name={name}::{value}")
 
 
-def print_github_summary(findings: List[Dict[str, Any]], submitted: bool):
-    """Print GitHub Actions job summary"""
+def print_github_summary(
+    findings: List[Dict[str, Any]], 
+    submitted: bool,
+    plan_info: Optional[Dict[str, Any]] = None,
+    limit_exceeded: Optional[RepositoryLimitExceeded] = None
+):
+    """Print GitHub Actions job summary
+    
+    Args:
+        findings: List of findings from the scan
+        submitted: Whether findings were submitted to backend
+        plan_info: Optional plan information from the backend response
+        limit_exceeded: Optional exception if repository limit was exceeded
+    """
     github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     
     summary = f"""# LeftSize Cloud Cost Optimization Scan Results
@@ -303,6 +357,55 @@ def print_github_summary(findings: List[Dict[str, Any]], submitted: bool):
 ## Summary
 - **Findings**: {len(findings)}
 - **Submitted to Backend**: {'✅ Yes' if submitted else '❌ No'}
+
+"""
+    
+    # Show repository limit exceeded warning
+    if limit_exceeded:
+        summary += f"""## ⚠️ Free Tier Limit Reached
+
+Your free plan allows scanning **{limit_exceeded.limit} repositories**. You've already scanned {limit_exceeded.current_count} repositories.
+
+**Findings from this scan were not submitted** because the repository limit has been exceeded.
+
+### Upgrade to Pro
+Upgrade to LeftSize Pro for unlimited repository scanning and access to all optimization rules.
+
+👉 **[Upgrade Now]({limit_exceeded.upgrade_url})**
+
+---
+
+"""
+    
+    # Show plan info if available
+    if plan_info:
+        plan_type = plan_info.get('PlanType', 'Free')
+        repo_count = plan_info.get('ScannedRepositoryCount', 0)
+        repo_limit = plan_info.get('RepositoryLimit', 3)
+        
+        if plan_type == 'Free':
+            remaining = max(0, repo_limit - repo_count)
+            summary += f"""## Plan Information
+- **Plan**: Free Tier
+- **Repositories Scanned**: {repo_count} / {repo_limit}
+- **Remaining**: {remaining} repositories
+
+"""
+            if remaining <= 1:
+                summary += f"""### 💡 Running low on free scans?
+Upgrade to LeftSize Pro for unlimited repository scanning and access to all optimization rules.
+
+👉 **[Upgrade to Pro](https://github.com/marketplace/leftsize)**
+
+---
+
+"""
+        else:
+            summary += f"""## Plan Information
+- **Plan**: Pro ✨
+- **Repositories Scanned**: {repo_count} (unlimited)
+
+---
 
 """
     
@@ -531,6 +634,91 @@ def validate_azure_auth(azure_config: Dict[str, Any]) -> bool:
         return False
 
 
+def detect_azure_currency(subscription_id: str = None) -> str:
+    """
+    Detect billing currency from Azure subscription.
+    Tries to get currency from the Consumption API Price Sheet.
+    Falls back to USD if detection fails.
+    """
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.mgmt.resource import SubscriptionClient
+        import requests as req
+        
+        credential = DefaultAzureCredential()
+        
+        # Get subscription ID if not provided
+        if not subscription_id:
+            sub_client = SubscriptionClient(credential)
+            subs = list(sub_client.subscriptions.list())
+            if subs:
+                subscription_id = subs[0].subscription_id
+            else:
+                logger.warning("No Azure subscriptions found, defaulting to USD")
+                return "USD"
+        
+        # Get access token for Azure Resource Manager
+        token = credential.get_token("https://management.azure.com/.default")
+        
+        # Try to get currency from Consumption Price Sheet API
+        # This returns prices with currency info
+        url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.Consumption/pricesheets/default?api-version=2023-05-01&$top=1"
+        headers = {
+            "Authorization": f"Bearer {token.token}",
+            "Content-Type": "application/json"
+        }
+        
+        response = req.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Price sheet items have 'currencyCode' field
+            pricesheets = data.get('properties', {}).get('pricesheets', [])
+            if pricesheets and len(pricesheets) > 0:
+                currency = pricesheets[0].get('currencyCode', 'USD')
+                logger.info("Detected Azure billing currency", currency=currency, subscription_id=subscription_id)
+                return currency
+        
+        # If price sheet didn't work, try Cost Management API
+        # Query for a small cost amount to get the currency
+        cost_url = f"https://management.azure.com/subscriptions/{subscription_id}/providers/Microsoft.CostManagement/query?api-version=2023-03-01"
+        cost_body = {
+            "type": "ActualCost",
+            "timeframe": "MonthToDate",
+            "dataset": {
+                "granularity": "None",
+                "aggregation": {
+                    "totalCost": {"name": "Cost", "function": "Sum"}
+                }
+            }
+        }
+        
+        response = req.post(cost_url, headers=headers, json=cost_body, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Cost response has currency in properties
+            columns = data.get('properties', {}).get('columns', [])
+            for col in columns:
+                if col.get('name') == 'Currency':
+                    rows = data.get('properties', {}).get('rows', [])
+                    if rows and len(rows) > 0:
+                        # Find currency column index
+                        currency_idx = next((i for i, c in enumerate(columns) if c.get('name') == 'Currency'), -1)
+                        if currency_idx >= 0 and len(rows[0]) > currency_idx:
+                            currency = rows[0][currency_idx]
+                            logger.info("Detected Azure billing currency from Cost Management", currency=currency)
+                            return currency
+        
+        logger.warning("Could not detect Azure currency, defaulting to USD", 
+                      status_code=response.status_code if 'response' in dir() else 'N/A')
+        return "USD"
+        
+    except Exception as e:
+        logger.warning("Failed to detect Azure currency, defaulting to USD", error=str(e))
+        return "USD"
+
+
 def execute_custodian_policies(policies_dir: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Execute Cloud Custodian policies and collect findings"""
     logger.info("Executing Cloud Custodian policies", policies_dir=policies_dir)
@@ -646,9 +834,28 @@ def execute_single_policy_file(policies_file: str, config: Dict[str, Any]) -> Li
 
 
 def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> str:
-    """Build LeftSize scope from Azure resource ID"""
+    """Build LeftSize scope from resource ID - handles Azure and AWS formats"""
+    cloud_provider = config.get('cloud_provider', 'azure')
+    
+    # Helper to get AWS region from config or environment
+    def get_aws_region_from_config() -> str:
+        regions = config.get('targets', {}).get('aws', {}).get('regions', [])
+        if regions:
+            return regions[0]
+        return os.getenv('AWS_REGION', 'us-east-1')
+    
     try:
-        # Parse Azure resource ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
+        if cloud_provider == 'aws':
+            # AWS ARN format: arn:aws:service:region:account:resource
+            # Note: Some services like S3 have global ARNs without region (arn:aws:s3:::bucket)
+            if resource_id.startswith('arn:aws:'):
+                parts = resource_id.split(':')
+                if len(parts) >= 4 and parts[3]:  # Only use if region is non-empty
+                    return f"aws:region/{parts[3]}"
+            # Fallback: use configured region (for S3 and other region-less ARNs)
+            return f"aws:region/{get_aws_region_from_config()}"
+        
+        # Azure resource ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
         parts = resource_id.split('/')
         if len(parts) >= 5 and parts[1] == 'subscriptions':
             subscription_id = parts[2]
@@ -660,6 +867,10 @@ def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> st
             return f"azure:subscription/{subscription_id}"
     except Exception:
         # Final fallback - ensure we never return None
+        if cloud_provider == 'aws':
+            regions = config.get('targets', {}).get('aws', {}).get('regions', [])
+            region = regions[0] if regions else os.getenv('AWS_REGION', 'us-east-1')
+            return f"aws:region/{region}"
         subscription_id = get_subscription_id(config) or 'unknown'
         return f"azure:subscription/{subscription_id}"
 
@@ -720,6 +931,73 @@ def parse_custodian_output(output_dir: str, config: Dict[str, Any]) -> List[Dict
     return findings
 
 
+def extract_resource_id(resource: Dict[str, Any], config: Dict[str, Any]) -> str:
+    """Extract resource ID from Cloud Custodian resource - handles Azure and AWS formats"""
+    
+    cloud_provider = config.get('cloud_provider', 'azure')
+    
+    # Azure resources have 'id' field
+    if resource.get('id'):
+        return resource['id']
+    
+    # AWS resources use different ID fields depending on resource type
+    if cloud_provider == 'aws':
+        # S3 buckets use 'Name'
+        if resource.get('Name'):
+            bucket_name = resource['Name']
+            # Construct ARN-style ID for S3 buckets
+            return f"arn:aws:s3:::{bucket_name}"
+        
+        # EC2 instances use 'InstanceId'
+        if resource.get('InstanceId'):
+            instance_id = resource['InstanceId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            # Note: Account ID not available, using placeholder
+            return f"arn:aws:ec2:{region}::instance/{instance_id}"
+        
+        # EBS volumes use 'VolumeId'
+        if resource.get('VolumeId'):
+            volume_id = resource['VolumeId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::volume/{volume_id}"
+        
+        # EBS snapshots use 'SnapshotId'
+        if resource.get('SnapshotId'):
+            snapshot_id = resource['SnapshotId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::snapshot/{snapshot_id}"
+        
+        # RDS instances use 'DBInstanceIdentifier'
+        if resource.get('DBInstanceIdentifier'):
+            db_id = resource['DBInstanceIdentifier']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:rds:{region}::db/{db_id}"
+        
+        # Lambda functions use 'FunctionName' or 'FunctionArn'
+        if resource.get('FunctionArn'):
+            return resource['FunctionArn']
+        if resource.get('FunctionName'):
+            func_name = resource['FunctionName']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:lambda:{region}::function/{func_name}"
+        
+        # NAT Gateways use 'NatGatewayId'
+        if resource.get('NatGatewayId'):
+            nat_id = resource['NatGatewayId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::natgateway/{nat_id}"
+        
+        # Generic fallback for AWS - try common ID patterns
+        for id_field in ['Arn', 'ARN', 'ResourceId', 'ResourceARN']:
+            if resource.get(id_field):
+                return resource[id_field]
+    
+    # Final fallback - generate a unique ID from available data
+    resource_name = resource.get('name', '') or resource.get('Name', '') or 'unknown'
+    resource_type = resource.get('type', '') or resource.get('c7n:resource-type', '') or 'resource'
+    return f"{cloud_provider}:{resource_type}/{resource_name}"
+
+
 def convert_resource_to_finding(policy_name: str, resource: Dict[str, Any], config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert a Cloud Custodian resource to a LeftSize finding"""
     
@@ -727,10 +1005,11 @@ def convert_resource_to_finding(policy_name: str, resource: Dict[str, Any], conf
         # Use policy name directly as rule ID (already has leftsize- prefix)
         rule_id = policy_name
         
-        # Extract resource ID and basic info
-        resource_id = resource.get('id', '')
-        resource_name = resource.get('name', '')
-        resource_type = resource.get('type', '')
+        # Extract resource ID and basic info - handle both Azure and AWS formats
+        # Azure uses 'id', AWS uses various fields depending on resource type
+        resource_id = extract_resource_id(resource, config)
+        resource_name = resource.get('name', '') or resource.get('Name', '')
+        resource_type = resource.get('type', '') or resource.get('c7n:resource-type', '')
         
         # Build scope from resource ID
         scope = build_scope_from_resource_id(resource_id, config)
@@ -843,8 +1122,15 @@ def extract_resource_metadata(resource: Dict[str, Any], resource_id: str) -> Dic
 
 
 
-def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> None:
-    """Submit findings to LeftSize backend"""
+def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Submit findings to LeftSize backend
+    
+    Returns:
+        Dict with submission result info including plan details if available
+        
+    Raises:
+        RepositoryLimitExceeded: If the free tier repository limit is exceeded
+    """
     
     output_config = config.get('output', {})
     backend_url = output_config.get('backend_url')
@@ -852,21 +1138,26 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
     # Support both 'token' (from config file) and 'repository_token' (from command line)
     repository_token = output_config.get('repository_token') or output_config.get('token')
     
+    result = {'submitted': False, 'plan_info': None}
+    
     # Save local output if configured
     if output_config.get('local_output', {}).get('enabled', False):
         save_local_output(findings, output_config)
     
     if not backend_url or not installation_id:
         logger.warning("Backend URL or installation ID not configured, skipping submission")
-        return
+        return result
     
     if not repository_token:
         logger.warning("Repository token not configured, skipping submission")
-        return
+        return result
     
     try:
+        # Get currency from config
+        currency = config.get('currency', 'USD')
+        
         # Group findings by rule and scope (as expected by backend)
-        finding_groups = group_findings(findings)
+        finding_groups = group_findings(findings, currency)
         
         # Submit to backend - token passed via Authorization header (not in URL for security)
         url = f"{backend_url}/findings/{installation_id}"
@@ -880,21 +1171,49 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> N
         logger.info("Submitting findings to backend", 
                    url=url, 
                    finding_groups=len(finding_groups),
-                   total_findings=len(findings))
+                   total_findings=len(findings),
+                   currency=currency)
         
         response = requests.post(url, json=finding_groups, headers=headers, timeout=30)
+        
+        # Handle 402 Payment Required (repository limit exceeded)
+        if response.status_code == 402:
+            try:
+                error_data = response.json()
+                error_code = error_data.get('Code', '')
+                if error_code == 'REPOSITORY_LIMIT_EXCEEDED':
+                    context = error_data.get('Context', {})
+                    raise RepositoryLimitExceeded(
+                        error_data.get('Message', 'Repository limit exceeded'),
+                        context
+                    )
+            except (ValueError, KeyError):
+                pass
+            # If we can't parse the error, raise generic
+            response.raise_for_status()
+        
         response.raise_for_status()
         
+        response_data = response.json()
         logger.info("Findings submitted successfully", 
                    response_status=response.status_code,
-                   response_data=response.json())
+                   response_data=response_data)
         
+        result['submitted'] = True
+        # Extract plan info from response if available
+        if 'PlanInfo' in response_data:
+            result['plan_info'] = response_data['PlanInfo']
+        
+        return result
+        
+    except RepositoryLimitExceeded:
+        raise  # Re-raise to allow caller to handle specifically
     except Exception as e:
         logger.error("Failed to submit findings to backend", error=str(e))
         raise  # Re-raise to allow caller to handle
 
 
-def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def group_findings(findings: List[Dict[str, Any]], currency: str = 'USD') -> List[Dict[str, Any]]:
     """Group findings by rule ID and scope for backend submission"""
     
     groups = {}
@@ -906,6 +1225,7 @@ def group_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             groups[key] = {
                 'RuleId': finding['ruleId'],  # Use PascalCase to match backend expectation
                 'Scope': finding['scope'],
+                'Currency': currency,  # Include currency in the group
                 'Findings': []
             }
         
@@ -985,6 +1305,14 @@ def save_local_output(findings: List[Dict[str, Any]], output_config: Dict[str, A
 if __name__ == "__main__":
     # Check if running in GitHub Actions
     if os.getenv('GITHUB_ACTIONS') == 'true':
-        sys.exit(github_action_main())
+        # Check mode
+        mode = os.getenv('LEFTSIZE_MODE', 'scan').lower()
+        if mode == 'stats':
+            # Import and run stats mode
+            from stats import stats_main
+            sys.exit(stats_main())
+        else:
+            # Default: scan mode
+            sys.exit(github_action_main())
     else:
         sys.exit(main())

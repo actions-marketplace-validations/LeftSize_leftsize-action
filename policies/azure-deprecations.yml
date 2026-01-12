@@ -39,6 +39,8 @@ policies:
       Reference: https://azure.microsoft.com/updates?id=500578
     
     resource: azure.vm
+    metadata:
+      tier: pro
     
     filters:
       # Match all NVv4-series VM sizes
@@ -112,6 +114,8 @@ policies:
       Note: Can still be managed via infrastructure as code and Azure CLI until retirement date.
     
     resource: azure.appserviceplan
+    metadata:
+      tier: pro
     
     filters:
       # Match Linux Consumption hosting plan (Y1 SKU)
