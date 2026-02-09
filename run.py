@@ -103,6 +103,30 @@ def validate_aws_region(region: str) -> bool:
     return re.match(region_pattern, region.strip()) is not None
 
 
+def get_aws_account_id() -> Optional[str]:
+    """Get AWS account ID using STS GetCallerIdentity.
+    
+    Returns the 12-digit AWS account ID or None if unable to retrieve.
+    This is used to scope findings properly in multi-account setups.
+    """
+    try:
+        import boto3
+        sts = boto3.client('sts')
+        response = sts.get_caller_identity()
+        account_id = response.get('Account')
+        if account_id:
+            logger.info("Retrieved AWS account ID", account_id=account_id)
+            return account_id
+        logger.warning("STS GetCallerIdentity returned no Account")
+        return None
+    except ImportError:
+        logger.warning("boto3 not available, cannot retrieve AWS account ID")
+        return None
+    except Exception as e:
+        logger.warning("Failed to retrieve AWS account ID", error=str(e))
+        return None
+
+
 def validate_policy_name(policy_name: str) -> bool:
     """Validate policy name (alphanumeric, hyphens, underscores only)"""
     if not policy_name or not policy_name.strip():
@@ -143,6 +167,7 @@ def github_action_main():
     cloud_provider = os.getenv('LEFTSIZE_CLOUD_PROVIDER', 'azure')
     azure_subscription_ids = os.getenv('LEFTSIZE_AZURE_SUBSCRIPTION_IDS', '')
     aws_regions = os.getenv('LEFTSIZE_AWS_REGIONS', '')
+    environment_name = os.getenv('LEFTSIZE_ENVIRONMENT_NAME', '')
     currency = os.getenv('LEFTSIZE_CURRENCY', '')
     include_policies = os.getenv('LEFTSIZE_INCLUDE_POLICIES', '')
     exclude_policies = os.getenv('LEFTSIZE_EXCLUDE_POLICIES', '')
@@ -182,6 +207,11 @@ def github_action_main():
         
         # Store cloud provider in config for policy filtering
         config_data['cloud_provider'] = cloud_provider
+        
+        # Store environment name override if provided
+        if environment_name:
+            config_data['environment_name'] = environment_name.strip()
+            logger.info("Environment name override specified", environment=environment_name)
         
         # Override with environment variables
         if backend_url:
@@ -260,6 +290,13 @@ def github_action_main():
             # AWS auth validation handled by boto3/AWS CLI
             # AWS defaults to USD
             config_data['currency'] = currency.upper() if currency else 'USD'
+            
+            # Get AWS account ID for proper multi-account scope isolation
+            aws_account_id = get_aws_account_id()
+            if aws_account_id:
+                config_data.setdefault('targets', {}).setdefault('aws', {})['account_id'] = aws_account_id
+            else:
+                logger.warning("Could not retrieve AWS account ID - multi-account scoping may not work correctly")
         
         # Execute Cloud Custodian policies
         findings = execute_custodian_policies(policies_dir, config_data)
@@ -352,15 +389,19 @@ def print_github_summary(
     """
     github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     
-    summary = f"""# LeftSize Cloud Cost Optimization Scan Results
-
-## Summary
-- **Findings**: {len(findings)}
-- **Submitted to Backend**: {'✅ Yes' if submitted else '❌ No'}
-
-"""
+    # Calculate issues to be created vs findings requiring upgrade
+    findings_included = len(findings)
+    findings_require_upgrade = 0
+    findings_breakdown = []
     
-    # Show repository limit exceeded warning
+    if plan_info:
+        findings_included = plan_info.get('FindingsIncluded', len(findings))
+        findings_require_upgrade = plan_info.get('FindingsRequireUpgrade', 0)
+        findings_breakdown = plan_info.get('FindingsBreakdown') or []
+    
+    summary = "# LeftSize Scan Results\n\n"
+    
+    # Show repository limit exceeded warning first (if applicable)
     if limit_exceeded:
         summary += f"""## ⚠️ Free Tier Limit Reached
 
@@ -368,61 +409,126 @@ Your free plan allows scanning **{limit_exceeded.limit} repositories**. You've a
 
 **Findings from this scan were not submitted** because the repository limit has been exceeded.
 
-### Upgrade to Pro
-Upgrade to LeftSize Pro for unlimited repository scanning and access to all optimization rules.
-
-👉 **[Upgrade Now]({limit_exceeded.upgrade_url})**
+👉 **[Upgrade to Pro]({limit_exceeded.upgrade_url})** for unlimited repository scanning.
 
 ---
 
 """
     
-    # Show plan info if available
-    if plan_info:
-        plan_type = plan_info.get('PlanType', 'Free')
+    # Show summary table for Free tier users with breakdown
+    if plan_info and plan_info.get('PlanType') == 'Free' and findings_breakdown:
+        # Separate free and pro findings
+        free_tier_findings = [f for f in findings_breakdown if f.get('IsFreeTier', False)]
+        pro_tier_findings = [f for f in findings_breakdown if not f.get('IsFreeTier', False)]
+        
+        free_count = sum(f.get('ResourceCount', 0) for f in free_tier_findings)
+        pro_count = sum(f.get('ResourceCount', 0) for f in pro_tier_findings)
+        pro_savings = sum(f.get('EstimatedSavings', 0) for f in pro_tier_findings)
+        
+        # Summary table
+        summary += """## Summary
+
+| Plan | Findings | Issues Created |
+|------|----------|----------------|
+"""
+        summary += f"| Free Tier | {free_count} | ✅ {free_count} |\n"
+        if pro_count > 0:
+            summary += f"| Pro (upgrade required) | {pro_count} | ❌ 0 |\n"
+        summary += f"| **Total** | **{free_count + pro_count}** | **{free_count}** |\n\n"
+        
+        # Free tier findings table
+        if free_tier_findings:
+            summary += f"## Free Tier Findings ({free_count} → Issues Created)\n\n"
+            summary += "| Rule | Resources | Est. Savings |\n"
+            summary += "|------|-----------|-------------|\n"
+            for f in free_tier_findings:
+                rule_name = f.get('RuleName', f.get('RuleId', 'Unknown'))
+                resource_count = f.get('ResourceCount', 0)
+                savings = f.get('EstimatedSavings', 0)
+                savings_str = f"~${savings:,.0f}/mo" if savings > 0 else "-"
+                summary += f"| {rule_name} | {resource_count} | {savings_str} |\n"
+            summary += "\n"
+        
+        # Pro tier findings table (the upsell section)
+        if pro_tier_findings:
+            summary += f"## Pro Findings ({pro_count} → Upgrade to Unlock)\n\n"
+            summary += "| Rule | Resources | Est. Savings |\n"
+            summary += "|------|-----------|-------------|\n"
+            for f in pro_tier_findings:
+                rule_name = f.get('RuleName', f.get('RuleId', 'Unknown'))
+                resource_count = f.get('ResourceCount', 0)
+                savings = f.get('EstimatedSavings', 0)
+                savings_str = f"~${savings:,.0f}/mo" if savings > 0 else "-"
+                summary += f"| {rule_name} | {resource_count} | {savings_str} |\n"
+            summary += "\n"
+            
+            # Upsell message
+            upgrade_url = plan_info.get('UpgradeUrl', 'https://github.com/marketplace/leftsize')
+            if pro_savings > 0:
+                summary += f"> 💡 **Upgrade to Pro** to create issues for all {free_count + pro_count} findings and unlock ~${pro_savings:,.0f}/mo in additional estimated savings.\n"
+            else:
+                summary += f"> 💡 **Upgrade to Pro** to create issues for all {free_count + pro_count} findings.\n"
+            summary += f"> 👉 [Upgrade Now]({upgrade_url})\n\n"
+        
+        # Plan information footer
         repo_count = plan_info.get('ScannedRepositoryCount', 0)
         repo_limit = plan_info.get('RepositoryLimit', 3)
-        
-        if plan_type == 'Free':
-            remaining = max(0, repo_limit - repo_count)
-            summary += f"""## Plan Information
-- **Plan**: Free Tier
-- **Repositories Scanned**: {repo_count} / {repo_limit}
-- **Remaining**: {remaining} repositories
-
-"""
-            if remaining <= 1:
-                summary += f"""### 💡 Running low on free scans?
-Upgrade to LeftSize Pro for unlimited repository scanning and access to all optimization rules.
-
-👉 **[Upgrade to Pro](https://github.com/marketplace/leftsize)**
-
----
-
-"""
-        else:
-            summary += f"""## Plan Information
-- **Plan**: Pro ✨
-- **Repositories Scanned**: {repo_count} (unlimited)
-
----
-
-"""
+        remaining = max(0, repo_limit - repo_count)
+        summary += "---\n\n"
+        summary += f"**Plan**: Free Tier ({repo_count}/{repo_limit} repositories scanned, {remaining} remaining)\n\n"
     
-    if findings:
-        # Group by rule
-        by_rule = {}
-        for finding in findings:
-            rule_id = finding.get('ruleId', 'unknown')
-            if rule_id not in by_rule:
-                by_rule[rule_id] = []
-            by_rule[rule_id].append(finding)
+    # Show Pro plan summary (simpler, all findings included)
+    elif plan_info and plan_info.get('PlanType') == 'Pro':
+        total_findings = len(findings)
+        total_savings = sum(f.get('EstimatedSavings', 0) for f in findings_breakdown) if findings_breakdown else 0
         
-        summary += "## Findings by Rule\n\n"
-        for rule_id, rule_findings in sorted(by_rule.items()):
-            summary += f"### {rule_id}\n"
-            summary += f"- Count: {len(rule_findings)}\n"
-            summary += f"- Scope: {rule_findings[0].get('scope', 'N/A')}\n\n"
+        summary += f"""## Summary
+
+- **Plan**: Pro ✨
+- **Findings Detected**: {total_findings}
+- **Issues Created**: ✅ {total_findings}
+"""
+        if total_savings > 0:
+            summary += f"- **Estimated Savings**: ~${total_savings:,.0f}/mo\n"
+        summary += "\n"
+        
+        # Show findings table
+        if findings_breakdown:
+            summary += "## Findings by Rule\n\n"
+            summary += "| Rule | Resources | Est. Savings | Category |\n"
+            summary += "|------|-----------|-------------|----------|\n"
+            for f in findings_breakdown:
+                rule_name = f.get('RuleName', f.get('RuleId', 'Unknown'))
+                resource_count = f.get('ResourceCount', 0)
+                savings = f.get('EstimatedSavings', 0)
+                savings_str = f"~${savings:,.0f}/mo" if savings > 0 else "-"
+                category = f.get('Category', 'unknown')
+                summary += f"| {rule_name} | {resource_count} | {savings_str} | {category} |\n"
+            summary += "\n"
+    
+    # Fallback: No plan info or no breakdown - show basic summary
+    else:
+        summary += f"""## Summary
+
+- **Findings Detected**: {len(findings)}
+- **Issues to be Created**: {findings_included}
+- **Submitted to Backend**: {'✅ Yes' if submitted else '❌ No'}
+
+"""
+        # Show basic findings by rule (fallback when no breakdown available)
+        if findings:
+            by_rule = {}
+            for finding in findings:
+                rule_id = finding.get('ruleId', 'unknown')
+                if rule_id not in by_rule:
+                    by_rule[rule_id] = []
+                by_rule[rule_id].append(finding)
+            
+            summary += "## Findings by Rule\n\n"
+            for rule_id, rule_findings in sorted(by_rule.items()):
+                summary += f"### {rule_id}\n"
+                summary += f"- Count: {len(rule_findings)}\n"
+                summary += f"- Scope: {rule_findings[0].get('scope', 'N/A')}\n\n"
     
     if github_step_summary:
         with open(github_step_summary, 'a') as f:
@@ -834,8 +940,16 @@ def execute_single_policy_file(policies_file: str, config: Dict[str, Any]) -> Li
 
 
 def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> str:
-    """Build LeftSize scope from resource ID - handles Azure and AWS formats"""
+    """Build LeftSize scope from resource ID - handles Azure and AWS formats.
+    
+    For AWS: Uses account ID + region for proper isolation in multi-account and multi-region setups.
+    For Azure: Uses subscription ID and resource group.
+    """
     cloud_provider = config.get('cloud_provider', 'azure')
+    
+    # Helper to get AWS account ID from config (set during initialization via STS)
+    def get_aws_account_id_from_config() -> Optional[str]:
+        return config.get('targets', {}).get('aws', {}).get('account_id')
     
     # Helper to get AWS region from config or environment
     def get_aws_region_from_config() -> str:
@@ -847,13 +961,28 @@ def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> st
     try:
         if cloud_provider == 'aws':
             # AWS ARN format: arn:aws:service:region:account:resource
-            # Note: Some services like S3 have global ARNs without region (arn:aws:s3:::bucket)
+            # Extract both account and region from ARN when available
+            account_id = None
+            region = None
+            
             if resource_id.startswith('arn:aws:'):
                 parts = resource_id.split(':')
-                if len(parts) >= 4 and parts[3]:  # Only use if region is non-empty
-                    return f"aws:region/{parts[3]}"
-            # Fallback: use configured region (for S3 and other region-less ARNs)
-            return f"aws:region/{get_aws_region_from_config()}"
+                # parts[3] is region, parts[4] is account ID
+                if len(parts) >= 5:
+                    if parts[3]:  # Region (empty for global services like S3)
+                        region = parts[3]
+                    if parts[4]:  # Account ID
+                        account_id = parts[4]
+            
+            # Fall back to config values if not in ARN
+            if not account_id:
+                account_id = get_aws_account_id_from_config()
+            if not region:
+                region = get_aws_region_from_config()
+            
+            # Use account + region scope for proper multi-account AND multi-region isolation
+            account_id = account_id or 'unknown'
+            return f"aws:account/{account_id}/region/{region}"
         
         # Azure resource ID: /subscriptions/{sub}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
         parts = resource_id.split('/')
@@ -868,9 +997,9 @@ def build_scope_from_resource_id(resource_id: str, config: Dict[str, Any]) -> st
     except Exception:
         # Final fallback - ensure we never return None
         if cloud_provider == 'aws':
-            regions = config.get('targets', {}).get('aws', {}).get('regions', [])
-            region = regions[0] if regions else os.getenv('AWS_REGION', 'us-east-1')
-            return f"aws:region/{region}"
+            account_id = get_aws_account_id_from_config() or 'unknown'
+            region = get_aws_region_from_config()
+            return f"aws:account/{account_id}/region/{region}"
         subscription_id = get_subscription_id(config) or 'unknown'
         return f"azure:subscription/{subscription_id}"
 
@@ -1017,6 +1146,14 @@ def convert_resource_to_finding(policy_name: str, resource: Dict[str, Any], conf
         # Extract metadata from resource - only include what Cloud Custodian provides
         metadata = extract_resource_metadata(resource, resource_id)
         
+        # Add environment override if specified in config
+        # This allows users to manually specify environment when auto-detection doesn't work
+        environment_override = config.get('environment_name')
+        if environment_override:
+            if metadata is None:
+                metadata = {}
+            metadata['environmentOverride'] = environment_override
+        
         finding = {
             'ruleId': rule_id,
             'resourceId': resource_id,
@@ -1043,23 +1180,50 @@ def extract_resource_metadata(resource: Dict[str, Any], resource_id: str) -> Dic
     
     try:
         # Parse resource ID to extract components
+        # Azure format: /subscriptions/{sub}/resourceGroups/{rg}/...
+        # AWS format: arn:aws:service:region:account:resource
         parts = resource_id.split('/')
         if len(parts) >= 5 and parts[1] == 'subscriptions':
+            # Azure resource ID
             metadata['subscriptionId'] = parts[2]
             if len(parts) >= 5:
                 metadata['resourceGroup'] = parts[4]
             if len(parts) >= 9:
                 metadata['resourceName'] = parts[8]
+        elif resource_id.startswith('arn:aws:'):
+            # AWS ARN - extract account and region
+            arn_parts = resource_id.split(':')
+            if len(arn_parts) >= 5:
+                if arn_parts[3]:  # region (empty for global services)
+                    metadata['region'] = arn_parts[3]
+                if arn_parts[4]:  # account ID
+                    metadata['accountId'] = arn_parts[4]
         
-        # Extract location
+        # Extract location (Azure)
         location = resource.get('location')
         if location:
             metadata['location'] = location
         
-        # Extract tags
-        tags = resource.get('tags', {})
+        # Extract tags - handle both Azure (dict) and AWS (list) formats
+        # Azure: {"Environment": "Production", "Team": "DevOps"}
+        # AWS: [{"Key": "Environment", "Value": "Production"}, {"Key": "Team", "Value": "DevOps"}]
+        tags = resource.get('tags') or resource.get('Tags')
         if tags:
-            metadata['tags'] = tags
+            if isinstance(tags, dict):
+                # Azure format - already a dict
+                metadata['tags'] = tags
+            elif isinstance(tags, list):
+                # AWS format - convert list of Key/Value dicts to simple dict
+                tags_dict = {}
+                for tag in tags:
+                    if isinstance(tag, dict):
+                        key = tag.get('Key') if tag.get('Key') is not None else tag.get('key')
+                        # Handle value carefully - empty string '' is valid, None is not
+                        value = tag.get('Value') if 'Value' in tag else tag.get('value')
+                        if key and value is not None:
+                            tags_dict[key] = value
+                if tags_dict:
+                    metadata['tags'] = tags_dict
         
         # Extract resource-specific properties
         properties = resource.get('properties', {})

@@ -5,8 +5,6 @@ policies:
   - name: leftsize-idle-vm
     description: "Find idle Virtual Machines that can be stopped or downsized"
     resource: azure.vm
-    metadata:
-      tier: pro
     filters:
       - type: metric
         metric: 'Percentage CPU'
@@ -30,8 +28,6 @@ policies:
   - name: leftsize-idle-app-service-plan-no-apps
     description: "Find empty App Service Plans with no applications deployed"
     resource: azure.appserviceplan
-    metadata:
-      tier: free
     filters:
       # Filter for plans with no apps deployed (using sites count)
       - type: value
@@ -57,8 +53,6 @@ policies:
   - name: leftsize-idle-app-service-plan
     description: "Find underutilized App Service Plans with low resource usage"
     resource: azure.appserviceplan
-    metadata:
-      tier: pro
     filters:
       # Only target plans that have apps (to distinguish from empty plans)
       - type: value
@@ -95,8 +89,6 @@ policies:
   - name: leftsize-outdated-app-service-plan
     description: "Find App Service Plans using outdated or inefficient SKUs"
     resource: azure.appserviceplan
-    metadata:
-      tier: pro
     filters:
       # Target legacy SKUs that should be upgraded
       - type: value
@@ -126,8 +118,6 @@ policies:
   - name: leftsize-unattached-disk
     description: "Find unattached managed disks that can be deleted"
     resource: azure.disk
-    metadata:
-      tier: free
     filters:
       - type: value
         key: 'properties.diskState'
@@ -154,17 +144,15 @@ policies:
   - name: leftsize-unused-public-ip
     description: "Find unused public IP addresses that can be released"
     resource: azure.publicip
-    metadata:
-      tier: free
     filters:
       # Not attached to any resource
       - type: value
         key: 'properties.ipConfiguration'
         value: null
-      # Exclude static IPs that might be reserved intentionally (check allocation method)
+      # Only flag Static IPs — Dynamic IPs are free when unassociated
       - type: value
         key: 'properties.publicIPAllocationMethod'
-        op: 'ne'
+        op: 'eq'
         value: 'Static'
       # Only flag IPs older than 3 days
       - type: value
@@ -184,8 +172,6 @@ policies:
   - name: leftsize-inactive-azure-load-balancer
     description: "Find Azure Load Balancers with no active backend pools or targets"
     resource: azure.loadbalancer
-    metadata:
-      tier: free
     filters:
       # Load balancer has no backend pools configured
       - or:
@@ -221,8 +207,6 @@ policies:
   - name: leftsize-hybrid-benefit-missing
     description: "Find Windows VMs not using Azure Hybrid Benefit (up to 40% savings)"
     resource: azure.vm
-    metadata:
-      tier: pro
     filters:
       # Only Windows VMs
       - type: value
@@ -251,8 +235,6 @@ policies:
   - name: leftsize-vm-outdated-series
     description: "Find VMs using outdated series (v2/v3/v4) when v5/v6 available"
     resource: azure.vm
-    metadata:
-      tier: pro
     filters:
       # Running VMs only
       - type: value
@@ -270,11 +252,12 @@ policies:
         tag: leftsize-vm-series-upgrade
 
   # VM Scheduled Shutdown - 30-70% savings for non-prod
+  # Note: Only checks for non-prod tags on running VMs. Cannot verify auto-shutdown
+  # configuration (Microsoft.DevTestLab/schedules) with Cloud Custodian VM filters.
+  # Template instructs users to check and configure auto-shutdown.
   - name: leftsize-vm-scheduled-shutdown-missing
-    description: "Find non-production VMs without auto-shutdown configured"
+    description: "Find running non-production VMs that should have auto-shutdown configured"
     resource: azure.vm
-    metadata:
-      tier: pro
     filters:
       # Running VMs only
       - type: value
@@ -300,12 +283,12 @@ policies:
         days: 7
         tag: leftsize-auto-shutdown-review
 
-  # Orphaned Snapshots - 100% waste elimination
+  # Old Snapshots - review for cleanup
+  # Note: Only checks age >30 days. Cannot verify whether source disk still exists
+  # with Cloud Custodian filters alone. Template instructs users to verify before deleting.
   - name: leftsize-orphaned-snapshots
-    description: "Find old disk snapshots (>30 days) accumulating storage costs"
+    description: "Find disk snapshots older than 30 days that should be reviewed for cleanup"
     resource: azure.snapshot
-    metadata:
-      tier: free
     filters:
       # Snapshots older than 30 days
       - type: value
@@ -323,8 +306,6 @@ policies:
   - name: leftsize-storage-suboptimal-tier
     description: "Find storage accounts using Hot tier for infrequently accessed data"
     resource: azure.storage
-    metadata:
-      tier: pro
     filters:
       # Hot tier accounts
       - type: value
@@ -351,8 +332,6 @@ policies:
   - name: leftsize-vm-arm-architecture
     description: "Find VMs not using ARM-based sizes (Dpsv5/Epsv5) for cost savings"
     resource: azure.vm
-    metadata:
-      tier: pro
     filters:
       # Running VMs only
       - type: value
@@ -380,8 +359,6 @@ policies:
   - name: leftsize-sql-business-critical-nonprod
     description: "Find non-production SQL databases using expensive Business Critical tier"
     resource: azure.sql-database
-    metadata:
-      tier: pro
     filters:
       # Business Critical tier
       - type: value
@@ -412,8 +389,6 @@ policies:
   - name: leftsize-stopped-vm-storage-costs
     description: "Find stopped/deallocated VMs still incurring storage costs for premium disks"
     resource: azure.vm
-    metadata:
-      tier: free
     filters:
       # VM is deallocated (not running, not charged for compute)
       - type: value
@@ -431,3 +406,197 @@ policies:
         op: tag
         days: 7
         tag: leftsize-stopped-vm-review
+
+  # ========================================
+  # 💾 DISK & STORAGE OPTIMIZATION
+  # ========================================
+
+  # Disk Performance Plus - Free 2x IOPS/throughput boost
+  - name: leftsize-disk-performance-plus-missing
+    description: "Find Premium/Standard SSD disks 513+ GiB not using Performance Plus (free 2x boost)"
+    resource: azure.disk
+    filters:
+      # Only attached disks (in-use)
+      - type: value
+        key: 'properties.diskState'
+        value: 'Attached'
+      # Premium SSD or Standard SSD
+      - type: value
+        key: 'sku.name'
+        op: 'in'
+        value: ['Premium_LRS', 'Premium_ZRS', 'StandardSSD_LRS', 'StandardSSD_ZRS']
+      # Disk size >= 513 GiB (Performance Plus eligible)
+      - type: value
+        key: 'properties.diskSizeGB'
+        op: 'gte'
+        value: 513
+      # Performance Plus not enabled (burstingEnabled is false or absent)
+      - or:
+        - type: value
+          key: 'properties.burstingEnabled'
+          value: false
+        - type: value
+          key: 'properties.burstingEnabled'
+          value: null
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 7
+        tag: leftsize-performance-plus-review
+
+  # ========================================
+  # 🗄️ SQL DATABASE OPTIMIZATION
+  # ========================================
+
+  # Empty SQL Elastic Pools - Pure waste
+  # Note: Using armresource since azure.sql-elasticpool is not a registered Cloud Custodian resource type.
+  # ARM list response does not include database count, so we flag old pools for manual review.
+  - name: leftsize-sql-elastic-pool-empty
+    description: "Find SQL Elastic Pools older than 7 days that should be reviewed for emptiness"
+    resource: azure.armresource
+    filters:
+      # Target SQL Elastic Pool resource type
+      - type: resource-type
+        values:
+          - Microsoft.Sql/servers/elasticPools
+      # Pool has been running for more than 7 days (not newly created)
+      - type: value
+        key: 'properties.creationDate'
+        op: 'le'
+        value_type: age
+        value: 7
+    actions:
+      - type: mark-for-op
+        op: delete
+        days: 14
+        tag: leftsize-empty-elastic-pool-delete
+
+  # SQL Hybrid Benefit Missing - Up to 40% savings
+  # Note: azure.sql-database doesn't support tag/mark-for-op, using notify action
+  - name: leftsize-sql-hybrid-benefit-missing
+    description: "Find Azure SQL databases not using Azure Hybrid Benefit (up to 40% savings)"
+    resource: azure.sql-database
+    filters:
+      # vCore-based pricing (Hybrid Benefit only applies to vCore)
+      - type: value
+        key: 'sku.tier'
+        op: 'in'
+        value: ['GeneralPurpose', 'BusinessCritical', 'Hyperscale']
+      # License type is not BasePrice (Hybrid Benefit)
+      - or:
+        - type: value
+          key: 'properties.licenseType'
+          value: 'LicenseIncluded'
+        - type: value
+          key: 'properties.licenseType'
+          value: null
+      # Database is not a system database
+      - type: value
+        key: 'name'
+        op: 'ne'
+        value: 'master'
+
+  # ========================================
+  # 🐳 CONTAINER REGISTRY OPTIMIZATION
+  # ========================================
+
+  # Azure Container Registry without retention policy
+  - name: leftsize-acr-no-lifecycle-policy
+    description: |
+      Identifies Azure Container Registries without retention policies configured.
+      Without retention policies, old images accumulate indefinitely.
+      Similar to ECR, adding cleanup rules typically saves 50-90% on registry storage.
+      
+      ACR charges vary by SKU: Basic $0.167/day, Standard $0.667/day, Premium $1.667/day
+      plus $0.003/GB/day for storage beyond included amounts.
+    resource: azure.container-registry
+    filters:
+      # Retention policy is not enabled
+      - or:
+        - type: value
+          key: properties.policies.retentionPolicy.status
+          op: ne
+          value: enabled
+        - type: value
+          key: properties.policies.retentionPolicy
+          value: absent
+    metadata:
+      category: cost-optimization
+      severity: medium
+      tier: pro
+
+  # ========================================
+  # 💰 COST OPTIMIZATION - Phase 2
+  # ========================================
+
+  # Idle Application Gateways - $200-500/month waste
+  - name: leftsize-app-gateway-idle
+    description: "Find Application Gateways with no backend pools or zero request traffic"
+    resource: azure.application-gateway
+    filters:
+      # Gateway has no backend pools configured, or all pools are empty
+      - or:
+        - type: value
+          key: 'properties.backendAddressPools'
+          value: []
+        - type: value
+          key: 'properties.backendAddressPools[].properties.backendAddresses'
+          value: []
+      # Gateway is older than 7 days (avoid catching new deployments)
+      - type: value
+        key: 'properties.provisioningState'
+        value: 'Succeeded'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-app-gateway-idle-review
+
+  # Underutilized SQL Elastic Pools - 50%+ savings by downsizing
+  # DISABLED: azure.sql-elasticpool is not a registered Cloud Custodian resource type.
+  # This policy will fail at runtime. Re-enable when c7n-azure adds sql-elasticpool support,
+  # or rewrite using azure.armresource (which does not support metric filters).
+  # - name: leftsize-sql-elastic-pool-underutilized
+  #   description: "Find SQL Elastic Pools with DTU/vCore usage consistently below 20%"
+  #   resource: azure.sql-elasticpool
+  #   filters:
+  #     # Low DTU consumption over 14 days
+  #     - type: metric
+  #       metric: 'dtu_consumption_percent'
+  #       aggregation: 'average'
+  #       timeframe: 14
+  #       interval: 'P1D'
+  #       op: 'le'
+  #       threshold: 20.0
+  #     # Pool has been running for at least 14 days
+  #     - type: value
+  #       key: 'properties.state'
+  #       value: 'Ready'
+  #   actions:
+  #     - type: mark-for-op
+  #       op: tag
+  #       days: 14
+  #       tag: leftsize-elastic-pool-downsize-review
+
+  # Underutilized Azure Cache for Redis - 40-60% savings by downsizing
+  - name: leftsize-redis-cache-underutilized
+    description: "Find Azure Cache for Redis instances with memory usage consistently below 20%"
+    resource: azure.redis
+    filters:
+      # Low memory usage over 14 days
+      - type: metric
+        metric: 'usedmemorypercentage'
+        aggregation: 'average'
+        timeframe: 14
+        interval: 'P1D'
+        op: 'le'
+        threshold: 20.0
+      # Cache is in running state
+      - type: value
+        key: 'properties.provisioningState'
+        value: 'Succeeded'
+    actions:
+      - type: mark-for-op
+        op: tag
+        days: 14
+        tag: leftsize-redis-downsize-review
