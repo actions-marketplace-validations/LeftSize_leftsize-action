@@ -41,6 +41,40 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+def _build_custodian_env() -> dict[str, str]:
+    """Build filtered subprocess environment for Cloud Custodian.
+    
+    Only allows cloud provider credentials and essential system env vars.
+    Explicitly excludes GitHub Actions, LeftSize, and other action-specific secrets.
+    """
+    allow_prefixes = (
+        "AZURE_", "AWS_", "GOOGLE_", "GCP_",
+        "PATH", "HOME", "USER", "LANG", "LC_", "TZ",
+        "PYTHONPATH",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_", "REQUESTS_CA_BUNDLE"
+    )
+    exclude_prefixes = ("LEFTSIZE_", "GITHUB_", "INPUT_", "RUNNER_", "ACTIONS_")
+    
+    filtered = {}
+    for k, v in os.environ.items():
+        # Skip if it matches an exclude prefix
+        if any(k.startswith(p) for p in exclude_prefixes):
+            continue
+        # Include if it matches an allow prefix
+        if any(k == p or k.startswith(p) for p in allow_prefixes):
+            filtered[k] = v
+    
+    # Ensure critical keys exist even if not in allow_prefixes
+    for key in ("PATH", "HOME", "USER"):
+        if key in os.environ and key not in filtered:
+            filtered[key] = os.environ[key]
+    
+    logger.info("Filtered subprocess environment", env_var_count=len(filtered))
+    return filtered
+
+
 class RepositoryLimitExceeded(Exception):
     """Raised when the free tier repository limit is exceeded"""
     def __init__(self, message: str, context: Dict[str, Any]):
@@ -888,9 +922,12 @@ def execute_single_policy_file(policies_file: str, config: Dict[str, Any]) -> Li
         output_dir = os.path.join(temp_dir, 'custodian-output')
         os.makedirs(output_dir, exist_ok=True)
         
-        # Build Custodian command
+        # Build Custodian command - use the custodian from the same Python environment
+        custodian_bin = os.path.join(os.path.dirname(sys.executable), 'custodian')
+        if not os.path.isfile(custodian_bin):
+            custodian_bin = 'custodian'  # Fall back to PATH
         cmd = [
-            'custodian', 'run',
+            custodian_bin, 'run',
             '--output-dir', output_dir,
             '--cache-period', '0',  # Disable caching for fresh results
             policies_file
@@ -913,17 +950,21 @@ def execute_single_policy_file(policies_file: str, config: Dict[str, Any]) -> Li
                 capture_output=True,
                 text=True,
                 timeout=config.get('execution', {}).get('timeout_minutes', 30) * 60,
-                env=os.environ
+                env=_build_custodian_env()
             )
             
             if result.returncode != 0:
-                logger.error("Custodian execution failed", 
-                           returncode=result.returncode,
-                           stdout=result.stdout,
-                           stderr=result.stderr)
+                logger.error("Custodian execution failed", returncode=result.returncode)
+                # Only log stdout/stderr when LEFTSIZE_DEBUG is enabled
+                if os.environ.get("LEFTSIZE_DEBUG", "").lower() in ("1", "true", "yes"):
+                    logger.debug("Custodian stdout", stdout=result.stdout)
+                    logger.debug("Custodian stderr", stderr=result.stderr)
                 return []
             
-            logger.info("Custodian execution completed", stdout=result.stdout)
+            logger.info("Custodian execution completed")
+            # Only log stdout when LEFTSIZE_DEBUG is enabled
+            if os.environ.get("LEFTSIZE_DEBUG", "").lower() in ("1", "true", "yes"):
+                logger.debug("Custodian output", stdout=result.stdout)
             
             # Parse Custodian output
             findings = parse_custodian_output(output_dir, config)
@@ -1095,6 +1136,53 @@ def extract_resource_id(resource: Dict[str, Any], config: Dict[str, Any]) -> str
             snapshot_id = resource['SnapshotId']
             region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
             return f"arn:aws:ec2:{region}::snapshot/{snapshot_id}"
+
+        # VPCs use 'VpcId'
+        if resource.get('VpcId') and not resource.get('VpcEndpointId'):
+            vpc_id = resource['VpcId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::vpc/{vpc_id}"
+
+        # VPC Endpoints use 'VpcEndpointId'
+        if resource.get('VpcEndpointId'):
+            endpoint_id = resource['VpcEndpointId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::vpc-endpoint/{endpoint_id}"
+
+        # AMIs use 'ImageId'
+        if resource.get('ImageId'):
+            image_id = resource['ImageId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:ec2:{region}::image/{image_id}"
+
+        # EFS filesystems
+        if resource.get('FileSystemId'):
+            fs_id = resource['FileSystemId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:elasticfilesystem:{region}::file-system/{fs_id}"
+
+        # ElastiCache cache clusters
+        if resource.get('CacheClusterId'):
+            cache_id = resource['CacheClusterId']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:elasticache:{region}::cluster/{cache_id}"
+
+        # RDS snapshots
+        if resource.get('DBSnapshotArn'):
+            return resource['DBSnapshotArn']
+        if resource.get('DBSnapshotIdentifier'):
+            snap_id = resource['DBSnapshotIdentifier']
+            region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+            return f"arn:aws:rds:{region}::snapshot/{snap_id}"
+
+        # EKS clusters (c7n returns 'name' + 'arn')
+        if resource.get('arn') and 'eks' in str(resource.get('arn', '')):
+            return resource['arn']
+
+        # IAM users expose 'UserName' and 'Arn' (fallback Arn handles it, but ensure UserName path works)
+        if resource.get('UserName') and not resource.get('Arn'):
+            user_name = resource['UserName']
+            return f"arn:aws:iam:::user/{user_name}"
         
         # RDS instances use 'DBInstanceIdentifier'
         if resource.get('DBInstanceIdentifier'):
@@ -1116,10 +1204,45 @@ def extract_resource_id(resource: Dict[str, Any], config: Dict[str, Any]) -> str
             region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
             return f"arn:aws:ec2:{region}::natgateway/{nat_id}"
         
-        # Generic fallback for AWS - try common ID patterns
-        for id_field in ['Arn', 'ARN', 'ResourceId', 'ResourceARN']:
-            if resource.get(id_field):
-                return resource[id_field]
+        # Generic fallback for AWS - try common ARN/ID patterns across many c7n
+        # resource types before giving up. Ordered from most-specific to least.
+        # Values are checked for non-empty, so missing keys naturally skip.
+        arn_like_fields = [
+            # Fully-qualified ARNs (all casings c7n uses across resources)
+            'Arn', 'ARN', 'arn',
+            'LoadBalancerArn',         # app-elb, elbv2
+            'AutoScalingGroupARN',     # asg
+            'TableArn',                # dynamodb
+            'CertificateArn',          # acm-certificate
+            'serviceArn',              # ecs-service
+            'repositoryArn',           # ecr
+            'DBSnapshotArn',           # rds-snapshot (also handled earlier)
+            'ResourceARN', 'ResourceArn',
+            'ResourceId',
+        ]
+        for id_field in arn_like_fields:
+            val = resource.get(id_field)
+            if val:
+                return val
+
+        # Resources without ARNs in their payload — build one from identifier + region
+        region = resource.get('Region', os.getenv('AWS_REGION', 'us-east-1'))
+        if resource.get('AutoScalingGroupName'):
+            return f"arn:aws:autoscaling:{region}::autoScalingGroup/{resource['AutoScalingGroupName']}"
+        if resource.get('LoadBalancerName'):  # classic ELB
+            return f"arn:aws:elasticloadbalancing:{region}::loadbalancer/{resource['LoadBalancerName']}"
+        if resource.get('AllocationId'):  # EIP
+            return f"arn:aws:ec2:{region}::elastic-ip/{resource['AllocationId']}"
+        if resource.get('GroupId'):  # security group
+            return f"arn:aws:ec2:{region}::security-group/{resource['GroupId']}"
+        if resource.get('DomainName'):  # elasticsearch / opensearch
+            return f"arn:aws:es:{region}::domain/{resource['DomainName']}"
+        if resource.get('TableName'):  # dynamodb without TableArn
+            return f"arn:aws:dynamodb:{region}::table/{resource['TableName']}"
+        if resource.get('logGroupName'):  # cloudwatch logs
+            return f"arn:aws:logs:{region}::log-group/{resource['logGroupName']}"
+        if resource.get('repositoryName'):  # ecr
+            return f"arn:aws:ecr:{region}::repository/{resource['repositoryName']}"
     
     # Final fallback - generate a unique ID from available data
     resource_name = resource.get('name', '') or resource.get('Name', '') or 'unknown'
@@ -1138,6 +1261,40 @@ def convert_resource_to_finding(policy_name: str, resource: Dict[str, Any], conf
         # Azure uses 'id', AWS uses various fields depending on resource type
         resource_id = extract_resource_id(resource, config)
         resource_name = resource.get('name', '') or resource.get('Name', '')
+        # For AWS resources that have tag-based names (e.g. VPCs, subnets),
+        # try extracting Name from the tag list so UI/search shows friendly names.
+        if not resource_name:
+            aws_tags = resource.get('Tags')
+            if isinstance(aws_tags, list):
+                for tag in aws_tags:
+                    if isinstance(tag, dict) and tag.get('Key') == 'Name' and tag.get('Value'):
+                        resource_name = tag['Value']
+                        break
+        # Fall back to the AWS resource identifier fields when no tag Name present
+        if not resource_name:
+            resource_name = (
+                resource.get('VpcId')
+                or resource.get('VpcEndpointId')
+                or resource.get('ImageId')
+                or resource.get('FileSystemId')
+                or resource.get('CacheClusterId')
+                or resource.get('DBSnapshotIdentifier')
+                or resource.get('DBInstanceIdentifier')
+                or resource.get('UserName')
+                or resource.get('InstanceId')
+                or resource.get('VolumeId')
+                or resource.get('SnapshotId')
+                or resource.get('LoadBalancerName')
+                or resource.get('AutoScalingGroupName')
+                or resource.get('DomainName')
+                or resource.get('TableName')
+                or resource.get('logGroupName')
+                or resource.get('repositoryName')
+                or resource.get('AllocationId')
+                or resource.get('GroupId')
+                or resource.get('NatGatewayId')
+                or ''
+            )
         resource_type = resource.get('type', '') or resource.get('c7n:resource-type', '')
         
         # Build scope from resource ID
@@ -1338,7 +1495,8 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> D
                    total_findings=len(findings),
                    currency=currency)
         
-        response = requests.post(url, json=finding_groups, headers=headers, timeout=30)
+        payload = {"FindingGroups": finding_groups, "Currency": currency}
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
         
         # Handle 402 Payment Required (repository limit exceeded)
         if response.status_code == 402:
@@ -1359,9 +1517,10 @@ def submit_findings(findings: List[Dict[str, Any]], config: Dict[str, Any]) -> D
         response.raise_for_status()
         
         response_data = response.json()
-        logger.info("Findings submitted successfully", 
-                   response_status=response.status_code,
-                   response_data=response_data)
+        logger.info("Findings submitted successfully", response_status=response.status_code)
+        # Only log response data when LEFTSIZE_DEBUG is enabled
+        if os.environ.get("LEFTSIZE_DEBUG", "").lower() in ("1", "true", "yes"):
+            logger.debug("Backend response", response_data=response_data)
         
         result['submitted'] = True
         # Extract plan info from response if available
@@ -1383,31 +1542,29 @@ def group_findings(findings: List[Dict[str, Any]], currency: str = 'USD') -> Lis
     groups = {}
     
     for finding in findings:
-        key = (finding['ruleId'], finding['scope'])
+        rule_id = finding['ruleId']
+        scope = finding['scope']
+        key = (rule_id, scope)
         
         if key not in groups:
+            # Determine cloud_provider from scope string
+            cloud_provider = 'azure' if scope.startswith('azure:') else 'aws'
             groups[key] = {
-                'RuleId': finding['ruleId'],  # Use PascalCase to match backend expectation
-                'Scope': finding['scope'],
-                'Currency': currency,  # Include currency in the group
-                'Findings': []
+                'policy': rule_id,
+                'scope': scope,
+                'cloud_provider': cloud_provider,
+                'resources': []
             }
         
-        # Determine severity for each individual finding
-        severity = determine_severity(finding['ruleId'], finding.get('metadata', {}))
-        
-        # Convert to backend expected format (PascalCase)
-        # Each finding needs: RuleId, ResourceId, Scope, EstSavings, Severity, Metadata
-        backend_finding = {
-            'RuleId': finding['ruleId'],
-            'ResourceId': finding['resourceId'],
-            'Scope': finding['scope'],
-            'EstSavings': finding.get('estimatedSavings', 0),
-            'Severity': severity,
-            'Metadata': finding.get('metadata')
+        resource = {
+            'resource_id': finding['resourceId'],
+            'policy': rule_id,
+            'metadata': finding.get('metadata') or {},
+            'estimated_savings': finding.get('estimatedSavings', 0),
+            'currency': currency,
         }
         
-        groups[key]['Findings'].append(backend_finding)
+        groups[key]['resources'].append(resource)
     
     return list(groups.values())
 
